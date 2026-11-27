@@ -47,13 +47,14 @@ func _run() -> void:
 	await _check_green_input(game)
 	_check_campaign(game)
 	_check_grafts(game)
+	await _check_live_cargo(game)
 	_check_defeat(game)
 	game._toggle_mute()
 	_check(not game.audio.muted, "Audio control")
 	game.queue_free()
 	await process_frame
 	if failures == 0:
-		print("Slope Orchard v0.4 probe passed: T1/T2/T5 Prep, Battle, Result, reinforcement, retries, grafts, companions, sandbox, cuts and scene.")
+		print("Slope Orchard v0.4.1 probe passed: T1/T2/T5 campaign, battle lock, retries, Sandbox, 10 unordered recipes in both modes, preview, merge, split, cuts, carried monsters and companions.")
 	quit(0 if failures == 0 else 1)
 
 func _scene_pixel(frame: Image, at: Vector2i) -> Color:
@@ -193,24 +194,53 @@ func _check_campaign(game: Node) -> void:
 	_check(granted and game.model.level_id == "t5" and game.model.stage == "Prep", "T2 to T5 Prep")
 
 func _check_grafts(game: Node) -> void:
+	var recipes := [[0,0,4],[1,1,5],[2,2,6],[3,3,7],[2,3,8],[0,2,9],[1,2,10],[1,3,11],[0,1,12],[0,3,13]]
+	for mode in ["t5", "sandbox"]:
+		game._restart(mode)
+		for recipe in recipes:
+			var expected: int = recipe[2]
+			for reverse in [false,true]:
+				var a: int = recipe[int(reverse)]
+				var b: int = recipe[1-int(reverse)]
+				var button := MOUSE_BUTTON_RIGHT if mode == "sandbox" else MOUSE_BUTTON_LEFT
+				game.bridge.equip_plant(0,a)
+				game.bridge.equip_plant(1,b)
+				game._refresh_model()
+				var target: Vector2 = game._fruit_center(1)
+				var seed: Vector2 = game.SEEDS + Vector2(a*game.SEED_STEP,0)
+				_mouse_button(game, seed if reverse else game._fruit_center(0), MOUSE_BUTTON_LEFT if reverse else button, true)
+				game.mouse = target
+				var hover = game._merge_preview(1)
+				_check(hover != null and hover.kind == expected and not hover.name.is_empty(), "Missing preview in "+mode)
+				_check(game.model.slots[1].kind == b, "Hover mutated the rack")
+				_mouse_button(game,target,MOUSE_BUTTON_LEFT if reverse else button,false)
+				var result: Dictionary = game.model.slots[1]
+				_check(result.kind == expected and hover != null and result.name == hover.name, "Preview/commit mismatch in "+mode)
+				_check(game.effects.any(func(e): return e.has("merge_slot") and e.merge_slot == 1), "Missing synthesis feedback")
+				_drag(game, seed, target, MOUSE_BUTTON_LEFT)
+				_check(game.model.slots[1].kind == expected, "Third seed overwrote a hybrid")
+				_drag(game, target,target,MOUSE_BUTTON_RIGHT)
+				_check(int(game.model.slots[1].kind) in [a,b], "Right-click split failed")
+				_drag(game, target,seed,button)
+				_check(game.model.slots[1] == null, "Return to seed tray failed")
 	game._restart("t5")
-	_check(game.model.preview.size() == 3 and game.model.available_plants.size() == 4, "T5 preview and tray")
 	var donor: Vector2 = game._fruit_center(1)
 	var base: Vector2 = game._fruit_center(2)
-	_drag(game, donor, base, MOUSE_BUTTON_LEFT)
-	_check(game.model.slots[1] == null and game.model.slots[2].graft == 3 and game.model.slots[2].kind == 1, "Drag graft orientation")
-	_drag(game, game.SEEDS, donor, MOUSE_BUTTON_LEFT)
-	_drag(game, base, donor, MOUSE_BUTTON_LEFT, true)
-	_check(game.model.slots[1].graft == 3 and game.model.slots[2].kind == 0, "Shift drag swap")
+	_drag(game,donor,base,MOUSE_BUTTON_LEFT)
+	_drag(game,game.SEEDS,donor,MOUSE_BUTTON_LEFT)
+	_drag(game,base,donor,MOUSE_BUTTON_LEFT,true)
+	_check(game.model.slots[1].kind == 11 and game.model.slots[2].kind == 0, "Shift drag swap")
 	game.lulucy_button.pressed.emit()
 	_check(not game.model.lulucy and game.model.hellhound.present, "Independent Lulucy toggle")
-	game.lulucy_button.pressed.emit()
 	game.next_button.pressed.emit()
 	_check(not game.companion_button.visible and not game.lulucy_button.visible and not game.level_buttons.sandbox.visible, "Battle controls locked")
 	_check(not game.bridge.swap_plants(1, 2) and not game.bridge.graft_plants(1, 2)
+		and not game.bridge.drop_seed(0,2) and not game.bridge.split_or_clear(1)
 		and not game.bridge.equip_plant(2, 3) and not game.bridge.set_lulucy(false), "Core Battle lock")
 	_drag(game, donor, base, MOUSE_BUTTON_LEFT, true)
-	_check(game.model.slots[1].graft == 3, "Battle drag moved a graft")
+	_check(game.model.slots[1].kind == 11, "Battle drag moved a hybrid")
+	game._restart("t5")
+	game.next_button.pressed.emit()
 	var tiers := {}
 	var oil := false
 	var burst := false
@@ -235,11 +265,33 @@ func _check_grafts(game: Node) -> void:
 	game._restart("sandbox")
 	game.companion_button.pressed.emit()
 	_check(game.model.lulucy and not game.model.hellhound.present, "Sandbox independent companions")
-	_drag(game, game.SEEDS + Vector2(game.SEED_STEP * 3, 0), donor, MOUSE_BUTTON_LEFT)
-	_drag(game, donor, base, MOUSE_BUTTON_RIGHT)
-	_check(game.model.slots[2].graft == 3 and game.model.slots[1] == null, "Live sandbox graft")
-	_drag(game, base, donor, MOUSE_BUTTON_LEFT, true)
-	_check(game.model.slots[1].graft == 3, "Live sandbox swap")
+func _check_live_cargo(game: Node) -> void:
+	for recipe in [[2,3,8],[1,3,11]]:
+		game._restart("sandbox")
+		for slot in [0,1,2,4,5]:
+			game.bridge.remove_plant(slot)
+		game.bridge.equip_plant(4,recipe[0])
+		game.bridge.drop_seed(recipe[1],4)
+		var carried := false
+		for frame in 400:
+			game.bridge.advance(0.1)
+			var state := _state(game.bridge)
+			if state.slots[4].stage >= 1:
+				game.bridge.cut_fruit(4)
+			for body in state.bodies:
+				if body.kind != recipe[2] or body.passengers.is_empty():
+					continue
+				var passenger: Dictionary = body.passengers[0]
+				_check(passenger.has("kind") and not state.monsters.any(func(m): return m.id == passenger.id),
+					"Carried monster must appear once in the snapshot")
+				_check(body.radius > 0 and (body.kind != 8 or body.rotation > 0), "Missing carrier geometry")
+				carried = true
+				break
+			if carried:
+				game._refresh_model()
+				await process_frame
+				break
+		_check(carried, "Missing live passenger for recipe %d" % recipe[2])
 
 func _check_defeat(game: Node) -> void:
 	game._restart("t2")

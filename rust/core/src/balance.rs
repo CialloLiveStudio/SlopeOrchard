@@ -12,7 +12,9 @@ const ACTION_PERIOD: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
-    Grafted,
+    OrchardMagnet,
+    AppleRain,
+    BubbleArcade,
     Casual,
     Greedy,
     Skilled,
@@ -24,12 +26,15 @@ impl Strategy {
         match self {
             Self::Casual => "Casual",
             Self::Greedy => "Greedy",
-            Self::Grafted => "Grafted",
+            Self::OrchardMagnet => "Bait+Quake+Katamari",
+            Self::AppleRain => "Pinata+Hellhound",
+            Self::BubbleArcade => "Bubble+Pinball+Lulucy",
             Self::CheeseAuditor(FruitKind::SlimeBerry) => "All-Berry",
             Self::Skilled => "Skilled",
             Self::CheeseAuditor(RedApple) => "All-Apple",
             Self::CheeseAuditor(BounceMelon) => "All-Melon",
             Self::CheeseAuditor(BowlingPumpkin) => "All-Pumpkin",
+            Self::CheeseAuditor(k) => k.name(),
         }
     }
 }
@@ -40,7 +45,7 @@ pub struct Config {
     pub strategy: Strategy,
 }
 
-pub const CONFIGS: [Config; 11] = [
+pub const CONFIGS: [Config; 13] = [
     Config {
         level: LevelId::T1,
         strategy: Strategy::Casual,
@@ -83,7 +88,15 @@ pub const CONFIGS: [Config; 11] = [
     },
     Config {
         level: LevelId::T5,
-        strategy: Strategy::Grafted,
+        strategy: Strategy::OrchardMagnet,
+    },
+    Config {
+        level: LevelId::T5,
+        strategy: Strategy::AppleRain,
+    },
+    Config {
+        level: LevelId::T5,
+        strategy: Strategy::BubbleArcade,
     },
 ];
 
@@ -95,7 +108,7 @@ pub struct Outcome {
     pub first_damage_tick: Option<u32>,
     pub max_concurrent_monsters: usize,
     pub assists: crate::Assists,
-    pub contributions: [CombatContribution; 4],
+    pub contributions: [CombatContribution; FruitKind::COUNT],
 }
 
 /// Guardrails use the unrounded percentages and mean printed in the report.
@@ -126,9 +139,13 @@ pub fn warnings(config: Config, win_rate: f32, hp: f32, shares: [(f32, f32); 4])
                 "T2 All-Pumpkin win rate {win_rate:.1}% exceeds 70%"
             ));
         }
-        (LevelId::T5, Strategy::Skilled | Strategy::Grafted) if win_rate < 90. => {
-            warnings.push(format!("T5 win rate {win_rate:.1}% is below 90%"))
-        }
+        (
+            LevelId::T5,
+            Strategy::Skilled
+            | Strategy::OrchardMagnet
+            | Strategy::AppleRain
+            | Strategy::BubbleArcade,
+        ) if win_rate < 90. => warnings.push(format!("T5 win rate {win_rate:.1}% is below 90%")),
         _ => {}
     }
     if config.level == LevelId::T2 {
@@ -161,15 +178,17 @@ impl Player {
     }
 
     fn apply_loadout(&self, orchard: &mut Orchard) {
-        if self.strategy == Strategy::Grafted {
-            for (from, to, replacement) in [
-                (1, 2, FruitKind::SlimeBerry),
-                (3, 4, RedApple),
-                (5, 1, BounceMelon),
-            ] {
-                assert!(orchard.graft_plants(from, to));
-                assert!(orchard.equip_plant(from, replacement));
-            }
+        use FruitKind::*;
+        let recipes: &[(usize, FruitKind)] = match self.strategy {
+            Strategy::OrchardMagnet => &[(2, Candy), (3, Quake), (4, Katamari)],
+            Strategy::AppleRain => &[(1, Pinata), (3, Pinata), (4, Pinata)],
+            Strategy::BubbleArcade => &[(2, Bubble), (3, Pinball), (4, Pinball)],
+            _ => &[],
+        };
+        for &(slot, recipe) in recipes {
+            let (a, b) = recipe.parents().unwrap();
+            assert!(orchard.equip_plant(slot, a));
+            assert!(orchard.merge(crate::PlantSource::Seed(b), slot));
         }
         if let Strategy::CheeseAuditor(kind) = self.strategy {
             for slot in 0..SLOTS.len() {
@@ -184,9 +203,11 @@ impl Player {
         match self.strategy {
             Strategy::Casual => self.casual(orchard),
             Strategy::Greedy => self.greedy(orchard),
-            Strategy::Skilled | Strategy::Grafted | Strategy::CheeseAuditor(_) => {
-                self.skilled(orchard)
-            }
+            Strategy::Skilled
+            | Strategy::OrchardMagnet
+            | Strategy::AppleRain
+            | Strategy::BubbleArcade
+            | Strategy::CheeseAuditor(_) => self.skilled(orchard),
         }
     }
 
@@ -352,10 +373,10 @@ fn forecast_x(orchard: &Orchard, monster: &Monster, time: f32) -> f32 {
 }
 
 fn shot_value(orchard: &Orchard, fruit: Fruit, origin: Point, velocity: Point) -> f32 {
-    let gravity = if fruit.kind == BounceMelon {
-        MELON_GRAVITY
-    } else {
-        GRAVITY
+    let gravity = match fruit.kind {
+        FruitKind::Quake => 1360.,
+        k if k.can_header() || k == FruitKind::Pinball => MELON_GRAVITY,
+        _ => GRAVITY,
     };
     let radius = fruit.kind.radius() * fruit.stage().scale();
     let speed = velocity.y - velocity.x * crate::SLOPE;
@@ -393,7 +414,10 @@ fn shot_value(orchard: &Orchard, fruit: Fruit, origin: Point, velocity: Point) -
             };
             direct = direct.max(precision * value);
         }
-        if fruit.kind == BowlingPumpkin {
+        if matches!(
+            fruit.kind,
+            BowlingPumpkin | FruitKind::Pinata | FruitKind::Katamari
+        ) {
             let gap = forecast_x(orchard, monster, floor_time) - landing;
             if (-3. ..=98.).contains(&gap) {
                 rolling += match monster.kind {
@@ -425,6 +449,12 @@ fn shot_value(orchard: &Orchard, fruit: Fruit, origin: Point, velocity: Point) -
         })
     {
         direct = direct.max(1.2);
+    }
+    if matches!(
+        fruit.kind,
+        FruitKind::Candy | FruitKind::Quake | FruitKind::Pinball
+    ) {
+        direct += 0.9 * crowded;
     }
     direct + rolling
 }

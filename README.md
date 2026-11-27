@@ -4,7 +4,20 @@ T1, T2 and T5 start in **Prep**. Drag seeds onto hooks to choose species, move p
 
 T1 introduces the wild Hellhound. Feed it apples to recruit it. In T2 and T5, 小黑 herds monsters, kicks parked pumpkins and heads spent melons back toward the vines. Swipe a ripe apple into its mouth to start a downhill dash, or wake it from a nap. In T5, 露露西 converts puddles into fragile oil. A purple diamond marks a monster whose next fruit hit deals double damage.
 
-In T5 Prep, drag a plant onto another to graft. The destination keeps its silhouette and receives the donor's trait. Hold Shift to swap occupied hooks. In the live sandbox, right-drag to graft, Shift-drag to swap, and use the seed tray and companion toggles at any time.
+T5 Prep and Sandbox share ten two-plant recipes. Drag a seed or a plant over another plant to preview the hybrid, then release to synthesize it. Either order gives the same fruit. Right-click a hybrid to split it or a single plant to clear it. Drag a plant to the seed tray to clear the whole hook. Hold Shift to swap hooks. In Sandbox, use right-drag for plant grafting and left-click to cut fruit.
+
+| Parents | Fruit | Mature or giant harvest |
+| --- | --- | --- |
+| Berry + Pumpkin | 块魂滚怪球 | Carries slimes downhill. A heavy or a full ball scatters the passengers into a slime pool. |
+| Apple + Pumpkin | 套娃皮纳塔瓜 | Bursts into a fan of apples on parking, breaking or Home Run. 小黑 can eat the apples. |
+| Melon + Pumpkin | 打桩震地瓜 | Slams the ground, launches monsters and dents lids. A giant slam removes lids. |
+| Berry + Melon | 吞怪大泡泡 | Swallows a monster, rebounds to chime height, then pops into a slime pool. |
+| Apple + Melon | 三连弹珠串 | Splits on cutting into three fast marbles, or five when giant. |
+| Apple + Berry | 糖渍诱饵果 | Sticks on landing and draws monsters in for five bites, or eight when giant. |
+| Two apples | 双生红苹果 | Drops two apples per cut. |
+| Two melons | 王冠甜瓜 | Rebounds higher and retains more energy. |
+| Two pumpkins | 重甲巨南瓜 | Parks on the fifth heavy contact when giant. |
+| Two berries | 巨泡粘液莓 | Spreads a slime pool twice as wide. |
 
 Right-click near a falling ripe fruit or a parked pumpkin to launch a Flash-Step Home Run. The bar by the doorway fills over seven seconds. Swipe a giant apple left from the first hook to heal one heart, with a fifteen-second digestion cooldown. After defeat, **重新布阵** returns to Prep and **直接重试** restarts Battle with your current plants and companions.
 

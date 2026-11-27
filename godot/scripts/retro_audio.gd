@@ -13,6 +13,9 @@ var voice := 0
 
 func _ready() -> void:
 	sounds = {
+		"synthesis": _sample(0.21, 830.0, 1660.0, 0.0, true),
+		"quake": _sample(0.24, 115.0, 37.0, 0.32),
+		"pop": _sample(0.095, 660.0, 145.0, 0.04),
 		"cut": _sample(0.075, 1200.0, 240.0, 0.8),
 		"green_cut": _sample(0.041, 2100.0, 520.0, 0.36),
 		"hit": _sample(0.11, 192.0, 64.0, 0.42),

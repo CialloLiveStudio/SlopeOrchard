@@ -1,8 +1,8 @@
 use godot::prelude::*;
 use serde_json::{json, Value};
 use slope_orchard_core::{
-    Body, FruitKind, HellhoundState, LevelId, Orchard, Phase, Point, SlotItem, VfxEvent, DT,
-    HOME_RUN_COOLDOWN, SLOTS, TRELLIS_Y,
+    Body, FruitKind, HellhoundState, LevelId, Orchard, Phase, PlantSource, Point, SlotItem,
+    VfxEvent, DT, HOME_RUN_COOLDOWN, SLOTS, TRELLIS_Y,
 };
 
 struct SlopeOrchardExtension;
@@ -25,7 +25,7 @@ fn item(value: Option<SlotItem>) -> Value {
     match value {
         Some(SlotItem::Fruit(fruit)) => json!({
             "type": "fruit",
-            "kind": fruit.kind as u8, "graft": fruit.graft.map(|k| k as u8), "stage": fruit.stage() as u8, "scale": fruit.stage().scale(),
+            "kind": fruit.kind as u8, "name": fruit.kind.name(), "stage": fruit.stage() as u8, "scale": fruit.stage().scale(),
             "age": fruit.age, "hanging": fruit.hanging(),
             "growth": fruit.growth(),
             "giant_age": fruit.age.saturating_sub(fruit.growth_ticks()),
@@ -40,7 +40,8 @@ fn body_snapshot(body: &Body) -> Value {
         "id": body.id, "kind": body.kind as u8, "stage": body.stage as u8,
         "scale": body.stage.scale(), "pos": point(body.pos), "velocity": point(body.velocity),
         "rolling": body.rolling, "bounces": body.bounces, "combo_bounces": body.combo_bounces,
-        "home_run": body.home_run, "graft": body.graft.map(|k| k as u8), "energy_ratio": body.energy_ratio, "near_shatter": body.near_shatter(),
+        "home_run": body.home_run, "radius": body.radius(), "rotation": body.rotation,
+        "passengers": body.passengers.iter().map(|m| json!({"id":m.id,"kind":m.kind as u8})).collect::<Vec<_>>(), "energy_ratio": body.energy_ratio, "near_shatter": body.near_shatter(),
     })
 }
 
@@ -156,15 +157,39 @@ impl OrchardBridge {
     }
 
     #[func]
-    fn equip_plant(&mut self, slot: i32, kind: i32) -> bool {
-        let kind = match kind {
-            0 => FruitKind::RedApple,
-            1 => FruitKind::BounceMelon,
-            2 => FruitKind::BowlingPumpkin,
-            3 => FruitKind::SlimeBerry,
-            _ => return false,
+    fn preview_graft(&self, from: i32, to: i32, seed: bool) -> GString {
+        let source = if seed {
+            FruitKind::SEEDS
+                .get(from as usize)
+                .copied()
+                .map(PlantSource::Seed)
+        } else {
+            Some(PlantSource::Slot(from as usize))
         };
-        self.orchard.equip_plant(slot as usize, kind)
+        let recipe = source.and_then(|s| self.orchard.preview_graft(s, to as usize));
+        json!(recipe.map(|k| json!({"kind":k as u8,"name":k.name()})))
+            .to_string()
+            .as_str()
+            .into()
+    }
+
+    #[func]
+    fn drop_seed(&mut self, seed: i32, to: i32) -> bool {
+        FruitKind::SEEDS
+            .get(seed as usize)
+            .is_some_and(|&k| self.orchard.drop_seed(k, to as usize))
+    }
+
+    #[func]
+    fn split_or_clear(&mut self, slot: i32) -> bool {
+        self.orchard.split_or_clear(slot as usize)
+    }
+
+    #[func]
+    fn equip_plant(&mut self, slot: i32, kind: i32) -> bool {
+        FruitKind::SEEDS
+            .get(kind as usize)
+            .is_some_and(|&k| self.orchard.equip_plant(slot as usize, k))
     }
 
     #[func]
@@ -248,7 +273,7 @@ impl OrchardBridge {
             .map(|monster| {
                 json!({
                     "id": monster.id, "kind": monster.kind as u8, "hp": monster.hp, "fragile": monster.fragile,
-                    "max_hp": monster.kind.hp(), "lid_hp": monster.lid_hp, "pos": point(monster.pos),
+                    "hungry":monster.hungry, "dizzy":monster.dizzy, "max_hp": monster.kind.hp(), "lid_hp": monster.lid_hp, "pos": point(monster.pos),
                 })
             })
             .collect();
@@ -293,6 +318,7 @@ impl OrchardBridge {
             })),
             "slot_x": SLOTS, "trellis_y": TRELLIS_Y,
             "reserve": orchard.reserve.iter().map(|&spare| item(Some(spare))).collect::<Vec<_>>(),
+            "baits": orchard.baits.iter().map(|b| json!({"pos":point(b.pos),"radius":b.radius,"bites":b.bites,"scale":b.stage.scale()})).collect::<Vec<_>>(),
             "bodies": bodies, "monsters": monsters, "barricades": barricades, "juice_zones": juice_zones,
         })
         .to_string()
@@ -312,6 +338,11 @@ impl OrchardBridge {
             .events
             .drain(..)
             .map(|event| match event {
+                VfxEvent::Synthesis(p) => json!(["synthesis", point(p)]),
+                VfxEvent::Pop(p) => json!(["pop", point(p)]),
+                VfxEvent::Quake(p, r) => json!(["quake", point(p), r]),
+                VfxEvent::CandyBite(p) => json!(["candy_bite", point(p)]),
+                VfxEvent::AppleRain(p) => json!(["apple_rain", point(p)]),
                 VfxEvent::FruitCut(pos, kind, vx) => {
                     json!(["cut", point(pos), kind as u8, vx])
                 }

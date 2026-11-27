@@ -36,7 +36,7 @@ fn report(config: Config, outcomes: &[Outcome]) -> (f32, usize) {
         .map(|outcome| outcome.max_concurrent_monsters)
         .max()
         .unwrap_or(0);
-    let totals: [(u32, u32); 4] = std::array::from_fn(|source| {
+    let totals: [(u32, u32); FruitKind::COUNT] = std::array::from_fn(|source| {
         outcomes
             .iter()
             .map(|outcome| outcome.contributions[source])
@@ -48,6 +48,14 @@ fn report(config: Config, outcomes: &[Outcome]) -> (f32, usize) {
     let kill_total = totals.iter().map(|(_, kills)| kills).sum();
     let shares =
         totals.map(|(damage, kills)| (percent(damage, damage_total), percent(kills, kill_total)));
+    let hybrid = totals[4..]
+        .iter()
+        .fold((0, 0), |(d, k), (next_d, next_k)| (d + next_d, k + next_k));
+    let hybrid = format!(
+        "{:.1}/{:.1}",
+        percent(hybrid.0, damage_total),
+        percent(hybrid.1, kill_total)
+    );
     let columns = shares.map(|(damage, kills)| format!("{damage:.1}/{kills:.1}"));
     let assists: [u32; 6] = outcomes.iter().fold([0; 6], |mut sums, outcome| {
         let a = outcome.assists;
@@ -64,7 +72,7 @@ fn report(config: Config, outcomes: &[Outcome]) -> (f32, usize) {
         sums
     });
     println!(
-        "{:?} | {:11} | {:6.1}% | {:11.2} | {:>16} | {:>21} | {:>11} | {:>11} | {:>11} | {:>11} | {:?}",
+        "{:?} | {:11} | {:6.1}% | {:11.2} | {:>16} | {:>21} | {:>11} | {:>11} | {:>11} | {:>11} | {:>11} | {:?}",
         config.level,
         config.strategy.name(),
         win_rate,
@@ -74,11 +82,14 @@ fn report(config: Config, outcomes: &[Outcome]) -> (f32, usize) {
         columns[0],
         columns[1],
         columns[2],
-        columns[3], assists,
+        columns[3], hybrid, assists,
     );
 
-    let mut issues = warnings(config, win_rate, hp, shares);
-    if matches!(config.strategy, Strategy::Skilled | Strategy::Grafted) {
+    let mut issues = warnings(config, win_rate, hp, shares[..4].try_into().unwrap());
+    if matches!(
+        config.strategy,
+        Strategy::Skilled | Strategy::OrchardMagnet | Strategy::AppleRain | Strategy::BubbleArcade
+    ) {
         if let Some(run) = outcomes
             .iter()
             .find(|o| o.first_damage_tick.is_some_and(|t| t < 15 * 120))
@@ -116,7 +127,7 @@ fn main() {
         SEED_COUNT - 1
     );
     println!("Damage/kill columns are percent. First damage is to the protagonist (number of affected runs).");
-    println!("Lv | Strategy    | WinRate | AvgRemainHP | AvgFirstDmgTime  | MaxConcurrentMonsters |   Apple D/K |   Melon D/K | Pumpkin D/K |    Berry D/K | Assists [shoves, pumpkin headers, melon headers, zoomies, detonations, bonus HP]");
+    println!("Lv | Strategy    | WinRate | AvgRemainHP | AvgFirstDmgTime  | MaxConcurrentMonsters |   Apple D/K |   Melon D/K | Pumpkin D/K |    Berry D/K | Hybrid D/K | Assists [shoves, pumpkin headers, melon headers, zoomies, detonations, bonus HP]");
     let mut mixed_hp = 0.;
     let mut pumpkin_hp = 0.;
     let mut violations = 0;
@@ -150,11 +161,10 @@ mod tests {
     #[test]
     fn balance_sim_smoke() {
         assert!(SEED_COUNT >= 128);
-        for level in [LevelId::T1, LevelId::T2, LevelId::T5] {
-            let config = Config {
-                level,
-                strategy: Strategy::Skilled,
-            };
+        for config in CONFIGS
+            .into_iter()
+            .filter(|c| c.level == LevelId::T5 || c.strategy == Strategy::Skilled)
+        {
             let first = run(config, 7);
             let repeat = run(config, 7);
             assert!(matches!(first.phase, Phase::Victory | Phase::Defeat));

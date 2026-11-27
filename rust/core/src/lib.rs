@@ -1,10 +1,15 @@
 use std::collections::VecDeque;
 
+mod crops;
+mod toys;
+pub use crops::FruitKind;
+use crops::ImpactClass;
 mod hellhound;
 mod levels;
 mod loadout;
 pub use hellhound::{Hellhound, HellhoundState, WildAction};
 pub use levels::{CompanionDef, LevelDef, LevelId, SpawnGroup, TameFightDef, WaveDef};
+pub use loadout::PlantSource;
 pub mod balance;
 
 pub const DT: f32 = 1.0 / 120.0;
@@ -72,47 +77,6 @@ impl Point {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FruitKind {
-    RedApple,
-    BounceMelon,
-    BowlingPumpkin,
-    SlimeBerry,
-}
-
-impl FruitKind {
-    pub fn growth_ticks(self) -> u32 {
-        match self {
-            Self::RedApple => 504,
-            Self::BounceMelon => 744,
-            Self::BowlingPumpkin => 1104,
-            Self::SlimeBerry => 624,
-        }
-    }
-
-    pub fn mature_ticks(self) -> u32 {
-        match self {
-            Self::RedApple => 240,
-            Self::BounceMelon => 384,
-            Self::BowlingPumpkin => 576,
-            Self::SlimeBerry => 312,
-        }
-    }
-
-    pub fn hanging_ticks(self) -> u32 {
-        (self.mature_ticks() * 3).div_ceil(10)
-    }
-
-    fn radius(self) -> f32 {
-        match self {
-            Self::RedApple => 6.5,
-            Self::BounceMelon => 8.0,
-            Self::BowlingPumpkin => 9.5,
-            Self::SlimeBerry => 7.0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Small,
     Mature,
@@ -131,34 +95,20 @@ impl Stage {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Fruit {
-    pub graft: Option<FruitKind>,
     pub kind: FruitKind,
     pub age: u32,
 }
 
 impl Fruit {
     pub fn new(kind: FruitKind) -> Self {
-        Self {
-            kind,
-            age: 0,
-            graft: None,
-        }
-    }
-
-    fn threshold(self, ticks: fn(FruitKind) -> u32) -> u32 {
-        let base = ticks(self.kind);
-        match self.graft {
-            Some(FruitKind::RedApple) if self.kind != FruitKind::RedApple => (base * 7 + 5) / 10,
-            Some(trait_kind) => base.max(ticks(trait_kind)),
-            None => base,
-        }
+        Self { kind, age: 0 }
     }
 
     pub fn growth_ticks(self) -> u32 {
-        self.threshold(FruitKind::growth_ticks)
+        self.kind.growth_ticks()
     }
     pub fn mature_ticks(self) -> u32 {
-        self.threshold(FruitKind::mature_ticks)
+        self.kind.mature_ticks()
     }
 
     pub fn stage(self) -> Stage {
@@ -253,7 +203,9 @@ impl From<FruitKind> for SlotItem {
 
 #[derive(Debug, Clone)]
 pub struct Body {
-    pub graft: Option<FruitKind>,
+    pub passengers: Vec<Monster>,
+    pub rotation: f32,
+    capture_bounces: u32,
     pub energy_ratio: f32,
     heavy_hits: u8,
     angled: bool,
@@ -274,68 +226,58 @@ pub struct Body {
 
 impl Body {
     pub fn near_shatter(&self) -> bool {
-        self.kind == FruitKind::BounceMelon && self.energy_ratio <= 0.15
+        self.kind.can_header() && self.energy_ratio <= 0.15
     }
 
-    fn extra_bounce(&self) -> bool {
-        self.graft == Some(FruitKind::BounceMelon)
-            && self.kind != FruitKind::BounceMelon
-            && self.bounces == 0
-            && self.stage != Stage::Small
-    }
-
-    fn radius(&self) -> f32 {
+    pub fn radius(&self) -> f32 {
         self.kind.radius() * self.stage.scale()
+            + if self.kind == FruitKind::Katamari {
+                self.passengers.len() as f32 * 1.6
+            } else {
+                0.
+            }
+    }
+
+    fn heavy_limit(&self) -> u8 {
+        if self.kind == FruitKind::ArmoredPumpkin {
+            5
+        } else {
+            3
+        }
     }
 
     fn push(&self) -> f32 {
         if self.stage == Stage::Small {
             return 5.0;
         }
-        let mass = match self.kind {
-            FruitKind::RedApple => 1.0,
-            FruitKind::SlimeBerry => 0.55,
-            FruitKind::BounceMelon => 0.42,
-            FruitKind::BowlingPumpkin => 4.0,
+        let mass = match self.kind.impact_class() {
+            ImpactClass::Apple => 1.0,
+            ImpactClass::Berry => 0.55,
+            ImpactClass::Melon => 0.42,
+            ImpactClass::Pumpkin => 4.0,
         };
-        let modifier = match self.graft {
-            Some(FruitKind::BowlingPumpkin) => 1.8,
-            Some(FruitKind::RedApple) if self.kind != FruitKind::RedApple => 0.8,
-            _ => 1.,
-        };
-        mass * modifier * self.stage.scale() * 26.0 + if self.home_run { 180. } else { 0. }
+        mass * self.stage.scale() * 26.0 + if self.home_run { 180. } else { 0. }
     }
 
     fn damage(&self, kind: MonsterKind) -> u8 {
-        let base = match (self.kind, self.stage, kind) {
+        let base = match (self.kind.impact_class(), self.stage, kind) {
             (_, Stage::Small, _) => return 1,
-            (FruitKind::SlimeBerry, _, _) => 1,
-            (
-                FruitKind::BowlingPumpkin,
-                Stage::Mature,
-                MonsterKind::Shield | MonsterKind::IronBoar,
-            ) => 1,
-            (FruitKind::BowlingPumpkin, Stage::Mature, MonsterKind::GreenSlime) if self.rolling => {
-                2
-            }
-            (
-                FruitKind::BowlingPumpkin,
-                Stage::Giant,
-                MonsterKind::Shield | MonsterKind::IronBoar,
-            ) => 2,
-            (FruitKind::RedApple, Stage::Giant, MonsterKind::IronBoar) => 6,
-            (FruitKind::RedApple, Stage::Giant, _) => 4,
-            (FruitKind::RedApple, Stage::Mature, MonsterKind::IronBoar) => 4,
-            (FruitKind::RedApple, Stage::Mature, _) => 2,
-            (FruitKind::BounceMelon, Stage::Giant, MonsterKind::IronBoar) => 2,
-            (FruitKind::BounceMelon, Stage::Giant, MonsterKind::GreenSlime) => 2,
-            (FruitKind::BounceMelon, Stage::Giant, _) => 3,
-            (FruitKind::BounceMelon, Stage::Mature, _) => 2,
-            (FruitKind::BowlingPumpkin, Stage::Giant, _) => 7,
-            (FruitKind::BowlingPumpkin, Stage::Mature, _) => 5,
+            (ImpactClass::Berry, _, _) => 1,
+            (ImpactClass::Pumpkin, Stage::Mature, MonsterKind::Shield | MonsterKind::IronBoar) => 1,
+            (ImpactClass::Pumpkin, Stage::Mature, MonsterKind::GreenSlime) if self.rolling => 2,
+            (ImpactClass::Pumpkin, Stage::Giant, MonsterKind::Shield | MonsterKind::IronBoar) => 2,
+            (ImpactClass::Apple, Stage::Giant, MonsterKind::IronBoar) => 6,
+            (ImpactClass::Apple, Stage::Giant, _) => 4,
+            (ImpactClass::Apple, Stage::Mature, MonsterKind::IronBoar) => 4,
+            (ImpactClass::Apple, Stage::Mature, _) => 2,
+            (ImpactClass::Melon, Stage::Giant, MonsterKind::IronBoar) => 2,
+            (ImpactClass::Melon, Stage::Giant, MonsterKind::GreenSlime) => 2,
+            (ImpactClass::Melon, Stage::Giant, _) => 3,
+            (ImpactClass::Melon, Stage::Mature, _) => 2,
+            (ImpactClass::Pumpkin, Stage::Giant, _) => 7,
+            (ImpactClass::Pumpkin, Stage::Mature, _) => 5,
         };
-        base + u8::from(self.graft == Some(FruitKind::BowlingPumpkin))
-            + if self.home_run { 2 } else { 0 }
+        base + if self.home_run { 2 } else { 0 }
     }
 
     fn roll_speed_cap(&self) -> f32 {
@@ -385,8 +327,12 @@ impl MonsterKind {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Monster {
+    pub hungry: bool,
+    pub dizzy: u32,
+    lift: f32,
+    vertical_speed: f32,
     pub id: u32,
     pub kind: MonsterKind,
     pub hp: u8,
@@ -447,6 +393,11 @@ pub enum Phase {
 
 #[derive(Debug)]
 pub enum VfxEvent {
+    Synthesis(Point),
+    Quake(Point, f32),
+    Pop(Point),
+    AppleRain(Point),
+    CandyBite(Point),
     FruitCut(Point, FruitKind, f32),
     FruitShatter(Point, FruitKind, Stage),
     MonsterHit(Point, u8, bool),
@@ -590,7 +541,7 @@ pub struct Assists {
 #[derive(Debug, Default)]
 pub struct RunStats {
     /// Damage actually removed from enemy HP, excluding overkill and taming.
-    pub fruits: [CombatContribution; 4],
+    pub fruits: [CombatContribution; FruitKind::COUNT],
     pub assists: Assists,
     pub first_damage_tick: Option<u32>,
     pub max_concurrent_monsters: usize,
@@ -606,6 +557,7 @@ pub struct Orchard {
     pub bodies: Vec<Body>,
     pub barricades: Vec<Barricade>,
     pub juice_zones: Vec<JuiceZone>,
+    pub baits: Vec<toys::Bait>,
     pub monsters: Vec<Monster>,
     pub events: VecDeque<VfxEvent>,
     pub hellhound: Option<Hellhound>,
@@ -635,7 +587,6 @@ impl Orchard {
         let mut slots = [None; SLOTS.len()];
         for &(slot, kind) in level.initial_plants {
             slots[slot] = Some(SlotItem::Fruit(Fruit {
-                graft: None,
                 kind,
                 age: if sandbox { kind.growth_ticks() } else { 0 },
             }));
@@ -659,6 +610,7 @@ impl Orchard {
             bodies: Vec::new(),
             barricades: Vec::new(),
             juice_zones: Vec::new(),
+            baits: Vec::new(),
             monsters: Vec::new(),
             events: VecDeque::new(),
             level,
@@ -679,7 +631,6 @@ impl Orchard {
         };
         if sandbox {
             orchard.reserve.push(SlotItem::Fruit(Fruit {
-                graft: None,
                 kind: FruitKind::BounceMelon,
                 age: FruitKind::BounceMelon.growth_ticks(),
             }));
@@ -875,34 +826,27 @@ impl Orchard {
         }
         let pos = Point::new(SLOTS[slot], TRELLIS_Y);
         let velocity = Point::new(vx, if vx == 0. { 0. } else { SWIPE_DROP_SPEED });
-        let id = self.id();
-        let body = Body {
-            graft: fruit.graft,
-            energy_ratio: 1.,
-            heavy_hits: 0,
-            angled: vx != 0.,
-            id,
-            pos,
-            kind: fruit.kind,
-            stage: fruit.stage(),
-            velocity,
-            bounces: 0,
-            combo_bounces: 0,
-            rolling: false,
-            home_run: false,
-            home_run_lane_distance: 0.,
-            hit: Vec::new(),
-            trellis_contacts: 0,
-            trellis_grazes: 0,
-        };
-        if fruit.kind == FruitKind::RedApple && fruit.graft == Some(fruit.kind) {
+        let mut body = Body::new(self.id(), fruit.kind, fruit.stage(), pos, velocity);
+        if fruit.kind == FruitKind::TwinApple {
+            body.kind = FruitKind::RedApple;
             let mut twin = body.clone();
             twin.id = self.id();
             twin.pos.x += 9.;
             twin.velocity.x += 10.;
             self.bodies.push(twin);
         }
-        self.bodies.push(body);
+        if fruit.kind == FruitKind::Pinball {
+            let count = if body.stage == Stage::Giant { 5 } else { 3 };
+            for i in 0..count {
+                let mut marble = body.clone();
+                marble.id = self.id();
+                let fan = i as f32 * 2. / (count - 1) as f32 - 1.;
+                marble.velocity = Point::new(vx + fan * 168., 135. + fan.abs() * 55.);
+                self.bodies.push(marble);
+            }
+        } else {
+            self.bodies.push(body);
+        }
         self.slots[slot] = Some(SlotItem::Fruit(Fruit { age: 0, ..fruit }));
         for neighbor in [slot.wrapping_sub(1), slot + 1] {
             if neighbor < SLOTS.len() {
@@ -925,7 +869,9 @@ impl Orchard {
             .bodies
             .iter()
             .enumerate()
-            .filter(|(_, body)| !body.rolling && body.velocity.y >= 0.)
+            .filter(|(_, body)| {
+                body.kind == FruitKind::Pinata || (!body.rolling && body.velocity.y >= 0.)
+            })
             .map(|(index, body)| (false, index, body));
         let parked = self
             .barricades
@@ -962,6 +908,10 @@ impl Orchard {
             from: self.protagonist.position(),
             target: body.pos,
         });
+        if body.kind == FruitKind::Pinata {
+            let pinata = self.bodies.remove(index);
+            self.apple_rain(&pinata);
+        }
         true
     }
 
@@ -1007,7 +957,7 @@ impl Orchard {
                     self.ring(slot);
                 }
                 Some(SlotItem::Fruit(fruit))
-                    if body.kind == FruitKind::BounceMelon
+                    if body.kind.melon_motion()
                         && body.stage != Stage::Small
                         && body.bounces > 0
                         && fruit.hanging()
@@ -1023,7 +973,7 @@ impl Orchard {
                     self.events.push_back(VfxEvent::TrellisKnock(pos));
                 }
                 Some(SlotItem::Fruit(_))
-                    if body.kind == FruitKind::BounceMelon
+                    if body.kind.melon_motion()
                         && body.stage != Stage::Small
                         && body.bounces > 0
                         && body.trellis_grazes & mask == 0
@@ -1066,7 +1016,6 @@ impl Orchard {
     }
 
     fn melon_bounce_event(&mut self, body: &Body, monster_hit: bool) {
-        self.splash(body);
         self.events.push_back(VfxEvent::MelonBounce(body.pos));
         self.events.push_back(VfxEvent::MelonCombo {
             pos: body.pos,
@@ -1076,19 +1025,27 @@ impl Orchard {
     }
 
     fn launch_melon_rebound(&self, body: &mut Body, speed: f32) {
-        let speed =
-            if body.graft == Some(FruitKind::BounceMelon) && body.kind == FruitKind::BounceMelon {
-                (speed * 1.18).min(690.)
-            } else {
-                speed
-            };
+        let speed = if body.kind == FruitKind::CrownMelon {
+            (speed * 1.18).min(690.)
+        } else {
+            speed
+        };
         body.energy_ratio = (speed / 400.).powi(2).clamp(0., 0.95);
         body.bounces += 1;
         body.combo_bounces += 1;
         body.home_run = false;
         body.velocity.y = -speed;
         body.velocity.x = if body.pos.x < 460. { 34. } else { -24. };
-        let rise = body.pos.y - TRELLIS_Y;
+        if let Some(vx) = self.chime_velocity(body.pos, speed) {
+            body.velocity.x = vx;
+        }
+        body.hit.clear();
+        body.trellis_contacts = 0;
+        body.trellis_grazes = 0;
+    }
+
+    fn chime_velocity(&self, pos: Point, speed: f32) -> Option<f32> {
+        let rise = pos.y - TRELLIS_Y;
         let effective_speed = speed - MELON_GRAVITY * DT / 2.;
         let discriminant = effective_speed * effective_speed - 2. * MELON_GRAVITY * rise;
         if rise > 0. && discriminant >= 0. {
@@ -1097,41 +1054,33 @@ impl Orchard {
                 .zip(self.slots)
                 .filter(|(x, item)| {
                     matches!(item, Some(SlotItem::Chime { cooldown: 0 }))
-                        && (**x - body.pos.x).abs() <= 60.
+                        && (**x - pos.x).abs() <= 60.
                 })
-                .map(|(x, _)| *x - body.pos.x)
+                .map(|(x, _)| *x - pos.x)
                 .min_by(|a, b| a.abs().total_cmp(&b.abs()));
             if let Some(dx) = target {
                 let travel = 2. * rise / (effective_speed + discriminant.sqrt());
-                body.velocity.x = (dx / travel).clamp(-185., 185.);
+                return Some((dx / travel).clamp(-185., 185.));
             }
         }
-        body.hit.clear();
-        body.trellis_contacts = 0;
-        body.trellis_grazes = 0;
+        None
     }
 
     fn splash(&mut self, body: &Body) {
-        let mut add_zone = |kind, radius| {
-            self.juice_zones.push(JuiceZone {
-                kind,
-                left: body.pos.x - radius,
-                right: body.pos.x + radius,
-                ticks_left: JUICE_TICKS,
-            })
+        let radius = match body.kind {
+            FruitKind::MegaBerry => 52.,
+            FruitKind::SlimeBerry => 26.,
+            _ => return,
         };
-        if body.kind == FruitKind::SlimeBerry || body.graft == Some(FruitKind::SlimeBerry) {
-            let enhanced = body.kind == FruitKind::SlimeBerry && body.graft == Some(body.kind);
-            add_zone(Puddle::Slime, if enhanced { 47. } else { 26. });
-        }
-        if body.graft == Some(FruitKind::RedApple) && body.kind != FruitKind::RedApple {
-            add_zone(Puddle::Juice, 20.);
-        }
+        self.slime_pool(body.pos.x, radius);
     }
 
     fn shatter(&mut self, body: &Body) -> bool {
+        if body.kind == FruitKind::Pinata {
+            self.apple_rain(body);
+        }
         self.splash(body);
-        if body.kind == FruitKind::SlimeBerry
+        if matches!(body.kind, FruitKind::SlimeBerry | FruitKind::MegaBerry)
             && body.pos.y >= ground(body.pos.x) - body.radius() - 1.
         {
             for monster in &mut self.monsters {
@@ -1172,7 +1121,7 @@ impl Orchard {
         if body.stage == Stage::Small {
             return Some(self.shatter(body));
         }
-        if body.kind == FruitKind::BounceMelon {
+        if body.kind.melon_motion() {
             body.pos.y = self.barricades[index].body.pos.y
                 - self.barricades[index].body.radius()
                 - body.radius();
@@ -1207,6 +1156,19 @@ impl Orchard {
     }
 
     fn move_body(&mut self, body: &mut Body) -> bool {
+        if matches!(
+            body.kind,
+            FruitKind::Katamari
+                | FruitKind::Bubble
+                | FruitKind::Quake
+                | FruitKind::Candy
+                | FruitKind::Pinball
+        ) {
+            return self.move_toy(body);
+        }
+        if body.kind == FruitKind::Pinata && body.rolling && body.pos.x >= 455. {
+            return self.shatter(body);
+        }
         let old = body.pos;
         let radius = body.radius();
         if body.rolling {
@@ -1231,18 +1193,14 @@ impl Orchard {
             body.velocity.y = body.velocity.x * SLOPE + descent / DT;
             body.pos.y = ground(body.pos.x) - radius - (clearance - descent);
             if clearance <= descent {
-                if body.home_run_lane_distance == 0. && body.kind == FruitKind::RedApple {
-                    self.splash(body);
-                }
                 body.home_run_lane_distance += dx;
-                if body.kind == FruitKind::BowlingPumpkin {
+                if body.kind.impact_class() == ImpactClass::Pumpkin {
                     body.rolling = true;
-                    self.splash(body);
                     self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
                 }
             }
         } else {
-            body.velocity.y += if body.kind == FruitKind::BounceMelon {
+            body.velocity.y += if body.kind.melon_motion() {
                 MELON_GRAVITY
             } else {
                 GRAVITY
@@ -1279,12 +1237,15 @@ impl Orchard {
                 continue;
             }
             let lid_contact = Self::shield_contact(body, old, monster);
-            let breaks_lid = body.home_run
-                || (body.stage == Stage::Giant && body.kind != FruitKind::BounceMelon);
+            let breaks_lid =
+                body.home_run || (body.stage == Stage::Giant && !body.kind.melon_motion());
             if let Some(contact) = lid_contact.filter(|_| {
                 !breaks_lid
                     && !monster.fragile
-                    && !matches!(body.kind, FruitKind::BowlingPumpkin | FruitKind::SlimeBerry)
+                    && !matches!(
+                        body.kind.impact_class(),
+                        ImpactClass::Pumpkin | ImpactClass::Berry
+                    )
             }) {
                 monster.lid_hp -= 1;
                 self.events
@@ -1296,12 +1257,11 @@ impl Orchard {
                 if body.near_shatter() {
                     return self.shatter(body);
                 }
-                if body.kind == FruitKind::BounceMelon || body.extra_bounce() {
+                if body.kind.melon_motion() {
                     let speed = body.velocity.y * 1.5;
                     self.launch_melon_rebound(body, speed);
                     self.melon_bounce_event(body, true);
                 } else {
-                    self.splash(body);
                     body.velocity.x *= 1.5;
                     body.velocity.y *= -1.5;
                     body.hit.clear();
@@ -1338,13 +1298,13 @@ impl Orchard {
                     .push_back(VfxEvent::ShieldLidBreak(lid_contact.unwrap_or(monster.pos)));
             }
             let (id, kind) = (monster.id, monster.kind);
-            let combo_push = if body.kind == FruitKind::BounceMelon {
+            let combo_push = if body.kind.melon_motion() {
                 1. + 0.10 * body.combo_bounces.min(6) as f32
             } else {
                 1.
             };
-            let resistance = match (kind, body.kind, body.stage) {
-                (MonsterKind::Shield, FruitKind::BowlingPumpkin, Stage::Mature) => 2.8,
+            let resistance = match (kind, body.kind.impact_class(), body.stage) {
+                (MonsterKind::Shield, ImpactClass::Pumpkin, Stage::Mature) => 2.8,
                 (MonsterKind::IronBoar, _, _) => 2.1,
                 _ => 1.,
             };
@@ -1355,22 +1315,15 @@ impl Orchard {
             if body.stage == Stage::Small || body.near_shatter() {
                 return self.shatter(body);
             }
-            if body.extra_bounce() && body.kind != FruitKind::BowlingPumpkin {
-                let speed = body.velocity.y.max(200.) * MELON_MONSTER_RESTITUTION;
-                self.launch_melon_rebound(body, speed);
-                body.hit.push(id);
-                self.melon_bounce_event(body, true);
-                return true;
-            }
             if body.home_run && kind == MonsterKind::GreenSlime && body.kind == FruitKind::RedApple
             {
                 body.velocity.x *= 0.98;
                 body.velocity.y *= 0.98;
                 continue;
             }
-            match body.kind {
-                FruitKind::SlimeBerry | FruitKind::RedApple => return self.shatter(body),
-                FruitKind::BounceMelon => {
+            match body.kind.impact_class() {
+                ImpactClass::Berry | ImpactClass::Apple => return self.shatter(body),
+                ImpactClass::Melon => {
                     let impact = if body.home_run {
                         HOME_RUN_MELON_IMPACT
                     } else {
@@ -1382,16 +1335,15 @@ impl Orchard {
                     self.melon_bounce_event(body, true);
                     return true;
                 }
-                FruitKind::BowlingPumpkin => {
+                ImpactClass::Pumpkin => {
                     self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
                     if matches!(kind, MonsterKind::IronBoar | MonsterKind::Shield) {
                         body.heavy_hits += 1;
-                        if body.stage == Stage::Mature || body.heavy_hits >= 3 {
+                        if body.stage == Stage::Mature || body.heavy_hits >= body.heavy_limit() {
                             body.rolling = true;
                             body.velocity = Point::default();
                             body.pos.y = ground(body.pos.x) - radius;
                             self.events.push_back(VfxEvent::ShellCrack(body.pos));
-                            self.splash(body);
                             return true;
                         }
                     }
@@ -1416,12 +1368,10 @@ impl Orchard {
         }
 
         if body.home_run {
-            if body.kind == FruitKind::SlimeBerry && body.home_run_lane_distance > 0. {
+            if body.kind.impact_class() == ImpactClass::Berry && body.home_run_lane_distance > 0. {
                 return self.shatter(body);
             }
-            if body.kind == FruitKind::BounceMelon
-                && body.home_run_lane_distance >= HOME_RUN_MELON_ROLL_OUT
-            {
+            if body.kind.melon_motion() && body.home_run_lane_distance >= HOME_RUN_MELON_ROLL_OUT {
                 return self.rebound(body);
             }
         } else if !body.rolling && body.pos.y + radius >= ground(body.pos.x) {
@@ -1429,14 +1379,10 @@ impl Orchard {
             if body.stage == Stage::Small {
                 return self.shatter(body);
             }
-            if body.extra_bounce() {
-                return self.rebound(body);
-            }
-            match body.kind {
-                FruitKind::SlimeBerry | FruitKind::RedApple => return self.shatter(body),
-                FruitKind::BounceMelon => return self.rebound(body),
-                FruitKind::BowlingPumpkin => {
-                    self.splash(body);
+            match body.kind.impact_class() {
+                ImpactClass::Berry | ImpactClass::Apple => return self.shatter(body),
+                ImpactClass::Melon => return self.rebound(body),
+                ImpactClass::Pumpkin => {
                     body.rolling = true;
                     body.velocity.x = ((body.velocity.x + body.velocity.y * SLOPE)
                         / (1. + SLOPE * SLOPE))
@@ -1457,6 +1403,10 @@ impl Orchard {
             self.hellhound = self.level.tame_fight.map(|_| Hellhound::wild(pos));
         }
         self.monsters.push(Monster {
+            hungry: false,
+            dizzy: 0,
+            lift: 0.,
+            vertical_speed: 0.,
             id,
             kind,
             hp: kind.hp(),
@@ -1510,6 +1460,7 @@ impl Orchard {
         self.bodies.clear();
         self.barricades.clear();
         self.juice_zones.clear();
+        self.baits.clear();
         if next.reinforcement.is_none() || self.reinforced {
             self.advance_wave();
         }
@@ -1563,6 +1514,22 @@ impl Orchard {
                 monster.fragile = true;
             }
             monster.in_oil = oil;
+            monster.hungry = false;
+            if monster.lift > 0. || monster.vertical_speed > 0. || monster.dizzy > 0 {
+                monster.dizzy = monster.dizzy.saturating_sub(1);
+                monster.vertical_speed -= GRAVITY * DT;
+                monster.lift = (monster.lift + monster.vertical_speed * DT).max(0.);
+                if monster.lift == 0. {
+                    monster.vertical_speed = 0.;
+                }
+                monster.pos.x = (old_x + monster.knockback * DT).min(SPAWN_X);
+                monster.knockback *= 0.985;
+                monster.pos.y = ground(monster.pos.x) - monster.kind.radius() - monster.lift;
+                continue;
+            }
+            if toys::approach_bait(monster, &mut self.baits, &mut self.events) {
+                continue;
+            }
             let slide = if slippery { 1.65 } else { 1. };
             let speed = if monster.kind == MonsterKind::WildHellhound {
                 let dog = self.hellhound.as_mut().unwrap();
@@ -1622,6 +1589,7 @@ impl Orchard {
             }
         }
         self.barricades.retain(|barrier| barrier.hits_left > 0);
+        self.baits.retain(|bait| bait.bites > 0);
     }
 
     pub fn step(&mut self) {
@@ -1687,15 +1655,19 @@ impl Orchard {
             if self.move_body(&mut body) {
                 if body.rolling
                     && body.velocity.x < ROLL_THRESHOLD
-                    && (body.stage == Stage::Mature || body.heavy_hits >= 3)
+                    && (body.stage == Stage::Mature || body.heavy_hits >= body.heavy_limit())
                 {
                     body.rolling = false;
                     body.home_run = false;
                     body.velocity = Point::default();
-                    let hits_left = match body.graft {
-                        Some(FruitKind::BowlingPumpkin) => 4,
-                        Some(FruitKind::RedApple) => 1,
-                        _ => 2,
+                    if body.kind == FruitKind::Pinata {
+                        self.shatter(&body);
+                        continue;
+                    }
+                    let hits_left = if body.kind == FruitKind::ArmoredPumpkin {
+                        4
+                    } else {
+                        2
                     };
                     self.barricades.push(Barricade {
                         body,
@@ -1753,6 +1725,7 @@ impl Orchard {
         }
         if self.phase == Phase::Battle
             && self.monsters.is_empty()
+            && self.bodies.iter().all(|b| b.passengers.is_empty())
             && groups
                 .iter()
                 .zip(&self.spawned)
@@ -1765,6 +1738,8 @@ impl Orchard {
 
 #[cfg(test)]
 mod tests_v04;
+#[cfg(test)]
+mod tests_v041;
 
 #[cfg(test)]
 mod tests {
@@ -1802,11 +1777,7 @@ mod tests {
             Stage::Mature => kind.mature_ticks(),
             Stage::Giant => kind.growth_ticks(),
         };
-        orchard.slots[slot] = Some(SlotItem::Fruit(Fruit {
-            kind,
-            age,
-            graft: None,
-        }));
+        orchard.slots[slot] = Some(SlotItem::Fruit(Fruit { kind, age }));
     }
 
     fn stage_at(orchard: &Orchard, slot: usize) -> Stage {
@@ -1823,11 +1794,7 @@ mod tests {
             (FruitKind::BounceMelon, 384, 744),
             (FruitKind::BowlingPumpkin, 576, 1104),
         ] {
-            let fruit = |age| Fruit {
-                kind,
-                age,
-                graft: None,
-            };
+            let fruit = |age| Fruit { kind, age };
             assert_eq!((kind.mature_ticks(), kind.growth_ticks()), (mature, giant));
             assert_eq!(fruit(mature - 1).stage(), Stage::Small);
             assert_eq!(fruit(mature).stage(), Stage::Mature);
@@ -1926,7 +1893,6 @@ mod tests {
         ] {
             orchard.vines[1] = VineSway::default();
             orchard.slots[1] = Some(SlotItem::Fruit(Fruit {
-                graft: None,
                 kind: FruitKind::RedApple,
                 age: threshold - 1,
             }));
@@ -1997,7 +1963,6 @@ mod tests {
         assert!(sandbox.slots.iter().all(|slot| matches!(
             slot,
             Some(SlotItem::Fruit(Fruit {
-                graft: None,
                 kind: FruitKind::BowlingPumpkin,
                 ..
             }))

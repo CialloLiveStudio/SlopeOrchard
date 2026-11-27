@@ -13,7 +13,9 @@ const INK := Color("#202b3e")
 const PAPER := Color("#fff4d9")
 const GOLD := Color("#ffcd72")
 const PINK := Color("#ff82b7")
-const FRUIT_COLORS := [Color("#f4504f"), Color("#a2d45d"), Color("#ffad47"), Color("#bc6cc9")]
+const FRUIT_COLORS := [Color("#f4504f"), Color("#a2d45d"), Color("#ffad47"), Color("#bc6cc9"),
+	Color("#ec5464"), GOLD, Color("#576078"), Color("#bf68cf"), Color("#98da66"), Color("#ff7267"),
+	Color("#f3ad4d"), Color("#d995e8"), Color("#b5de74"), Color("#ed81bd")]
 const GREEN := Color("#c6eb82")
 const SLASH := Color("#ffd27e")
 const WAVE := 0
@@ -36,6 +38,11 @@ var clouds: Array[ImageTexture] = []
 var fruit_textures: Array[ImageTexture] = []
 var green_fruits: Array[ImageTexture] = []
 var fruit_flashes: Array[ImageTexture] = []
+const KATAMARI := 8
+const BUBBLE := 11
+const PINBALL := 12
+const CANDY := 13
+var marble: Texture2D
 var monsters: Array[ImageTexture] = []
 var monster_flashes: Array[ImageTexture] = []
 var shield_lids: Array[ImageTexture] = []
@@ -92,6 +99,12 @@ func _ready() -> void:
 		fruit_textures.append(Art.sprite(Art.FRUIT[i], Art.FRUIT_PALETTES[i]))
 		green_fruits.append(Art.sprite(Art.FRUIT[i], Art.GREEN_FRUIT_PALETTE))
 		fruit_flashes.append(Art.sprite(Art.FRUIT[i], Art.FRUIT_PALETTES[i], true))
+	for mask in Art.HYBRIDS:
+		var sprite := Art.sprite(mask, Art.HYBRID_PALETTE)
+		fruit_textures.append(sprite)
+		green_fruits.append(sprite)
+		fruit_flashes.append(Art.sprite(mask, Art.HYBRID_PALETTE, true))
+	marble = Art.sprite(Art.MARBLE, Art.HYBRID_PALETTE)
 	var slime_colors := {"O": "#23483c", "L": "#68c35c", "D": "#388e52", "H": "#c6ed85", "W": "#ffffdc"}
 	var boar_colors := {"O": "#302d39", "G": "#8497a0", "B": "#506778", "H": "#c9dade",
 		"W": "#fff1c7", "P": "#a47159", "R": "#bb8567", "D": "#74504b"}
@@ -249,11 +262,11 @@ func _refresh_model() -> void:
 		PREP, SANDBOX:
 			next_button.text = "开始守卫"
 			var used: int = model.slots.filter(func(item): return item != null).size()
-			hint.text = "果架 %d/%d · 拖种子换种" % [used, model.plant_limit]
+			hint.text = "果架 %d/%d · 拖种子" % [used, model.plant_limit]
 			if phase == SANDBOX:
-				hint.text += " · 右拖嫁接 · Shift 拖换位 · 左键切果"
+				hint.text += " · 右拖嫁接 · 右击拆分 · Shift 换位 · 左键切果"
 			elif model.grafting:
-				hint.text += " · 拖到植株嫁接 · Shift 拖换位"
+				hint.text += " · 拖到植株嫁接 · 右击拆分 · Shift 换位"
 			else:
 				hint.text += " · 拖动植株换位"
 		REINFORCEMENT:
@@ -383,9 +396,10 @@ func _begin_drag(button: int, shift: bool) -> bool:
 		return false
 	var kind := _seed_at(mouse)
 	if button == MOUSE_BUTTON_LEFT and kind >= 0:
+		drag_swap = false
 		dragged_item = SEED_DRAG + kind
 		drag_button = button
-		drag_item = {"type":"fruit", "kind":kind, "stage":1, "scale":1.0, "graft":null, "hanging":true, "giant_age":0}
+		drag_item = {"type":"fruit", "kind":kind, "stage":1, "scale":1.0, "hanging":true, "giant_age":0}
 		return true
 	if model.phase == REINFORCEMENT or (model.phase == SANDBOX and button == MOUSE_BUTTON_LEFT and not shift):
 		return false
@@ -398,21 +412,30 @@ func _begin_drag(button: int, shift: bool) -> bool:
 	var item = model.slots[index] if index < slot_x.size() else model.reserve[index - slot_x.size()]
 	if item == null:
 		return false
+	press_at = mouse
 	dragged_item = index
 	drag_button = button
 	drag_item = item
 	return true
+
+func _merge_preview(target: int):
+	if dragged_item < 0 or drag_swap or target < 0 or not model.grafting:
+		return null
+	var seed := dragged_item >= SEED_DRAG
+	return JSON.parse_string(bridge.preview_graft(dragged_item - SEED_DRAG if seed else dragged_item, target, seed))
 
 func _finish_drag() -> void:
 	if dragged_item >= 0:
 		var target := _slot_near(mouse, 24)
 		if target < 0:
 			target = _tray_index(mouse, dragged_item < slot_x.size())
-		if _seed_at(mouse) >= 0 and dragged_item < slot_x.size():
+		if target == dragged_item and drag_button == MOUSE_BUTTON_RIGHT and mouse.distance_to(press_at) < 4:
+			bridge.split_or_clear(target)
+		elif _seed_at(mouse) >= 0 and dragged_item < slot_x.size():
 			bridge.remove_plant(dragged_item)
 		elif target >= 0:
 			if dragged_item >= SEED_DRAG:
-				bridge.equip_plant(target, dragged_item - SEED_DRAG)
+				bridge.drop_seed(dragged_item - SEED_DRAG,target)
 			elif not drag_swap and target < slot_x.size() and model.slots[target] != null \
 				and model.slots[target].type == "fruit" and drag_item.type == "fruit":
 				bridge.graft_plants(dragged_item, target)
@@ -420,6 +443,7 @@ func _finish_drag() -> void:
 				bridge.swap_plants(dragged_item, target)
 	_stop_drag()
 	_refresh_model()
+	_drain_events()
 
 func _stop_drag() -> void:
 	drag_button = 0
@@ -499,29 +523,23 @@ func _stamp_item(item: Dictionary, center: Vector2, index: int) -> void:
 		var texture := green_fruits[kind] if item.stage == 0 else (fruit_flashes[kind] if flash else fruit_textures[kind])
 		if model.can_configure and index >= 0 and model.phase == PREP:
 			texture = fruit_textures[kind]
-		_stamp(texture, center, Vector2.ONE if model.phase == PREP else Vector2.ONE * float(item.scale))
-		_paint_graft(item.graft, center)
+		var scale_factor := 1.0 if model.phase == PREP else float(item.scale)
+		var pulse := 1.0
+		for effect in effects:
+			if effect.has("merge_slot") and effect.merge_slot == index:
+				pulse += 0.28 * sin((effect.until - elapsed) / 0.32 * PI)
+		_stamp(texture, center, Vector2.ONE * scale_factor * pulse)
+		if kind == KATAMARI:
+			var drip := fposmod(elapsed * 12 + index * 3, 10)
+			world.draw_rect(Rect2(center + Vector2(3, 6 * scale_factor + floor(drip)), Vector2(2, 3)), GREEN)
+		elif kind == CANDY:
+			_sparkle(center + Vector2(cos(elapsed*3)*10, sin(elapsed*3)*8).round(), GOLD)
 	else:
 		world.draw_rect(Rect2(center.round() - Vector2(1, 2), Vector2(3, 3)), Color("#568e4f"))
 
-func _paint_graft(graft, at: Vector2) -> void:
-	if graft == null:
-		return
-	var color: Color = [Color("#ff5d70"), Color("#ceff75"), Color("#ffc06c"), Color("#ce7aff")][int(graft)]
-	match int(graft):
-		0:
-			for p in [Vector2(-4,0), Vector2(2,3)]:
-				world.draw_rect(Rect2(at+p-Vector2.ONE, Vector2(5,4)), INK)
-				world.draw_rect(Rect2(at+p, Vector2(3,2)), color)
-		1, 2:
-			for x in [-4, 2]:
-				var dx := 3 if int(graft) == 1 else -1
-				world.draw_line(at+Vector2(x,-3), at+Vector2(x+dx,4), INK, 3)
-				world.draw_line(at+Vector2(x,-3), at+Vector2(x+dx,4), color)
-		3:
-			world.draw_rect(Rect2(at+Vector2(-5,2), Vector2(11,2)), color)
-			for x in [-4,3]:
-				world.draw_rect(Rect2(at+Vector2(x,4), Vector2(2,4)), Color("#91f689"))
+func _sparkle(at: Vector2, tint: Color) -> void:
+	world.draw_rect(Rect2(at - Vector2(2,0), Vector2(5,1)), tint)
+	world.draw_rect(Rect2(at - Vector2(0,2), Vector2(1,5)), tint)
 
 func _paint_juice(zone: Dictionary) -> void:
 	var first := maxi(0, ceili(zone.left))
@@ -540,8 +558,7 @@ func _paint_juice(zone: Dictionary) -> void:
 func _paint_barricade(barrier: Dictionary) -> void:
 	var at := _vec(barrier.body.pos)
 	var tint := Color("#837358") if barrier.rotting else Color.WHITE
-	_stamp(fruit_textures[2], at, Vector2.ONE * float(barrier.body.scale), tint)
-	_paint_graft(barrier.body.graft, at)
+	_stamp(fruit_textures[int(barrier.body.kind)], at, Vector2.ONE * float(barrier.body.scale), tint)
 	if barrier.body.stage == 2:
 		world.draw_polyline(PackedVector2Array([at+Vector2(-3,-5), at+Vector2(1,-1), at+Vector2(-1,1), at+Vector2(3,6)]), INK, 2)
 	for i in int(barrier.hits_left):
@@ -604,6 +621,14 @@ func _paint_world() -> void:
 				world.draw_set_transform(Vector2.ZERO)
 			else:
 				_stamp_item(item, center, i)
+	for bait in model.baits:
+		var at := _vec(bait.pos)
+		var ripple := fposmod(elapsed * 0.8 + at.x, 1.0)
+		world.draw_set_transform(at, atan(0.194), Vector2(1,0.23))
+		world.draw_arc(Vector2.ZERO, 6 + float(bait.radius)*ripple, 0, TAU, 28, Color(1,0.68,0.85,1-ripple), 2)
+		world.draw_set_transform(Vector2.ZERO)
+		_stamp(fruit_textures[CANDY], at, Vector2.ONE * float(bait.scale))
+		_sparkle(at + Vector2(8,-7), GOLD)
 	for barrier in model.barricades:
 		_paint_barricade(barrier)
 	for body in model.bodies:
@@ -614,6 +639,19 @@ func _paint_world() -> void:
 		if body.kind == 1 and body.velocity[1] < -300:
 			scaling *= Vector2(0.86, 1.14)
 		var texture := green_fruits[int(body.kind)] if body.stage == 0 else fruit_textures[int(body.kind)]
+		if body.kind == PINBALL:
+			texture = marble
+			scaling *= 1.35
+		if body.kind == BUBBLE:
+			var wobble := sin(elapsed*12+float(body.id))*0.07
+			scaling *= Vector2(1+wobble,1-wobble) * (1.35 if body.passengers.size() else 1.0)
+			if body.passengers.size():
+				var captive: Dictionary = body.passengers[0]
+				world.draw_set_transform(pos.round(), wobble*4)
+				_stamp(monsters[int(captive.kind)], Vector2(0,sin(elapsed*21)*1.5), scaling*0.68)
+				world.draw_set_transform(Vector2.ZERO)
+		if body.kind == KATAMARI:
+			scaling *= 1.0 + 0.15*body.passengers.size()
 		if body.home_run and body.velocity[0] > 200.0:
 			var direction := _vec(body.velocity).normalized()
 			for i in 3:
@@ -621,12 +659,18 @@ func _paint_world() -> void:
 				world.draw_line((streak - direction * (26 - i * 3)).round(),
 					(streak - direction * 7).round(), Color("#fffffff0"), 1)
 		if body.rolling:
-			world.draw_set_transform(pos.round(), floorf(pos.x / 6.0) * PI / 8.0, scaling)
+			world.draw_set_transform(pos.round(), float(body.rotation) if body.kind == KATAMARI else floorf(pos.x / 6.0) * PI / 8.0, scaling)
 			world.draw_texture(texture, -texture.get_size() / 2.0)
 			world.draw_set_transform(Vector2.ZERO)
 		else:
 			_stamp(texture, pos, scaling)
-		_paint_graft(body.graft, pos)
+		if body.kind == KATAMARI:
+			for i in body.passengers.size():
+				var angle: float = float(body.rotation) + i * TAU / body.passengers.size()
+				var orbit := pos + Vector2.from_angle(angle) * float(body.radius)
+				world.draw_set_transform(orbit.round(), angle+PI/2)
+				_stamp(monsters[int(body.passengers[i].kind)], Vector2.ZERO, Vector2.ONE * 0.68)
+				world.draw_set_transform(Vector2.ZERO)
 		if body.kind == 1 and body.energy_ratio < 1.0:
 			for side in [-1,1]:
 				var at := pos + Vector2(side * 4, -4)
@@ -638,12 +682,16 @@ func _paint_world() -> void:
 		if enemy.kind == 3:
 			continue # The wild enemy is drawn from the hellhound snapshot.
 		var pos := _vec(enemy.pos)
+		if enemy.hungry:
+			world.draw_string(FONT, pos + Vector2(-2,-16), "!", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, GOLD)
+		if enemy.dizzy > 0:
+			_orbit_stars(pos + Vector2(0,-12), 6)
 		if enemy.fragile:
 			world.draw_colored_polygon(PackedVector2Array([pos+Vector2(0,-24), pos+Vector2(3,-20), pos+Vector2(0,-16), pos+Vector2(-3,-20)]), Color("#ce85ff"))
 		var struck: bool = flashes.has(enemy.id)
 		var squash := Vector2.ONE
 		if enemy.kind == 0:
-			var lift := _ground(pos.x) - 7.0 - pos.y
+			var lift := clampf(_ground(pos.x) - 7.0 - pos.y, 0, 7)
 			squash = Vector2(1.08 - lift * 0.028, 0.87 + lift * 0.045)
 		var texture := monster_flashes[int(enemy.kind)] if struck else monsters[int(enemy.kind)]
 		var offset := -1 if enemy.kind == 2 else (2 if enemy.kind == 0 else 3)
@@ -661,6 +709,14 @@ func _paint_world() -> void:
 		_paint_hellhound(model.hellhound)
 	if dragged_item >= 0:
 		_stamp_item(drag_item, mouse - world.position, -1)
+		var target := _slot_near(mouse,24)
+		var preview = _merge_preview(target)
+		if preview != null:
+			var at := _fruit_center(target).round() + Vector2(-50,17)
+			world.draw_rect(Rect2(at,Vector2(100,24)), INK)
+			world.draw_rect(Rect2(at,Vector2(100,24)), GOLD, false)
+			_stamp(fruit_textures[int(preview.kind)], at+Vector2(13,12))
+			world.draw_string(FONT,at+Vector2(26,16),preview.name,HORIZONTAL_ALIGNMENT_LEFT,-1,11,PAPER)
 	if trail.size() > 1:
 		var tint := SLASH if trail_angled else PAPER
 		tint.a = clampf(trail_life * 15, 0.0, 1.0)
@@ -671,7 +727,15 @@ func _paint_world() -> void:
 	for effect in effects:
 		var age: float = effect.until - elapsed
 		var pos: Vector2 = effect.pos
-		if effect.has("hearts"):
+		if effect.has("quake"):
+			var frac := 1.0-age/0.3
+			world.draw_set_transform(pos.round(),atan(0.194),Vector2(1,0.28))
+			world.draw_arc(Vector2.ZERO, 4 + frac*float(effect.quake), 0, TAU, 28, Color(1,0.86,0.56,1-frac), 3)
+			world.draw_set_transform(Vector2.ZERO)
+		elif effect.has("merge_slot"):
+			for i in 6:
+				_sparkle(pos + Vector2.from_angle(i*TAU/6+age)*(8+(0.32-age)*44), GOLD)
+		elif effect.has("hearts"):
 			var time := 1.0 - age / float(effect.hearts)
 			var texture: Texture2D = effect.get("heart_texture", hearts[0])
 			for i in 3:
@@ -856,6 +920,20 @@ func _paint_swing_fan(at: Vector2, opacity: float) -> void:
 func _effect(event: Array, combo_hit := false) -> void:
 	var pos := _vec(event[1])
 	match event[0]:
+		"synthesis":
+			effects.append({"pos":pos,"merge_slot":_slot_near(pos+world.position,8),"until":elapsed+0.32})
+			audio.play("synthesis")
+		"quake":
+			shake = maxf(shake,2.0)
+			effects.append({"pos":pos,"quake":event[2],"until":elapsed+0.3})
+			audio.play("quake")
+		"pop", "apple_rain":
+			_debris(pos, PINK if event[0] == "pop" else GOLD, 15)
+			effects.append({"pos":pos,"until":elapsed+0.24,"color":PINK})
+			audio.play("pop")
+		"candy_bite":
+			_debris(pos, PINK, 3)
+			audio.play("munch")
 		"cut", "green_cut":
 			var green_cut: bool = event[0] == "green_cut"
 			_debris(pos, GREEN if green_cut else FRUIT_COLORS[int(event[2])], 5)

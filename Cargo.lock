@@ -189,11 +189,11 @@ dependencies = [
 
 [[package]]
 name = "slope-orchard-core"
-version = "0.4.0"
+version = "0.4.1"
 
 [[package]]
 name = "slope-orchard-extension"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "godot",
  "serde_json",

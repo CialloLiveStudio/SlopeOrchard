@@ -41,8 +41,7 @@ fn prep_battle_result_and_retries_enforce_command_permissions() {
         assert!(matches!(
             game.slots[1],
             Some(SlotItem::Fruit(Fruit {
-                kind: BounceMelon,
-                graft: Some(SlimeBerry),
+                kind: FruitKind::Bubble,
                 age: 0
             }))
         ));
@@ -82,65 +81,12 @@ fn ground_monsters_share_one_entrance_and_climb() {
 }
 
 #[test]
-fn all_sixteen_ordered_grafts_survive_harvest_and_refuse_a_third_parent() {
-    for base in CROPS {
-        for donor in CROPS {
-            let mut game = Orchard::new(LevelId::T5, 3);
-            assert!(game.equip_plant(0, donor) && game.equip_plant(1, base));
-            assert!(game.graft_plants(0, 1));
-            assert!(game.slots[0].is_none());
-            assert!(!game.graft_plants(2, 1) && !game.graft_plants(1, 2));
-            let Some(SlotItem::Fruit(ref mut fruit)) = game.slots[1] else {
-                panic!()
-            };
-            assert_eq!((fruit.kind, fruit.graft), (base, Some(donor)));
-            for (actual, first, second) in [
-                (
-                    fruit.growth_ticks(),
-                    base.growth_ticks(),
-                    donor.growth_ticks(),
-                ),
-                (
-                    fruit.mature_ticks(),
-                    base.mature_ticks(),
-                    donor.mature_ticks(),
-                ),
-            ] {
-                let expected = if donor == RedApple && base != RedApple {
-                    (first as f32 * 0.7).round() as u32
-                } else {
-                    first.max(second)
-                };
-                assert_eq!(actual, expected);
-            }
-            fruit.age = fruit.growth_ticks();
-            assert!(game.start_battle() && game.cut_fruit(1));
-            assert_eq!(
-                game.bodies.len(),
-                if base == RedApple && base == donor {
-                    2
-                } else {
-                    1
-                }
-            );
-            assert!(game
-                .bodies
-                .iter()
-                .all(|b| b.kind == base && b.graft == Some(donor) && b.stage == Stage::Giant));
-            assert!(
-                matches!(game.slots[1], Some(SlotItem::Fruit(f)) if f.graft == Some(donor) && f.age == 0)
-            );
-        }
-    }
-}
-
-#[test]
 fn berry_land_splash_slows_without_ticks_of_damage_and_big_puddle_spreads() {
     assert_eq!(
         (SlimeBerry.mature_ticks(), SlimeBerry.growth_ticks()),
         (312, 624)
     );
-    for graft in [None, Some(SlimeBerry)] {
+    for kind in [SlimeBerry, FruitKind::MegaBerry] {
         let mut game = isolated_sandbox();
         game.slots.fill(None);
         let x = 250.;
@@ -152,13 +98,17 @@ fn berry_land_splash_slows_without_ticks_of_damage_and_big_puddle_spreads() {
             Point::new(x, ground(x) - 6.),
             Point::new(0., 300.),
         );
-        berry.graft = graft;
+        berry.kind = kind;
         assert!(!game.move_body(&mut berry));
         let zone = &game.juice_zones[0];
         assert_eq!(zone.kind, Puddle::Slime);
         assert_eq!(
             zone.right - zone.left,
-            if graft.is_some() { 94. } else { 52. }
+            if kind == FruitKind::MegaBerry {
+                104.
+            } else {
+                52.
+            }
         );
         let start = game.monsters[0].pos.x;
         for _ in 0..120 {
@@ -221,44 +171,6 @@ fn every_fruit_even_green_detonates_oil_once_and_bonus_belongs_to_fruit() {
                 .events
                 .iter()
                 .any(|e| matches!(e, VfxEvent::FragileBurst(_))));
-        }
-    }
-}
-
-#[test]
-fn super_bounce_armor_and_grafted_landings_modify_base_physics() {
-    let mut game = isolated_sandbox();
-    let mut melon = body_at(
-        &mut game,
-        BounceMelon,
-        Stage::Giant,
-        Point::new(240., ground(240.) - 10.),
-        Point::new(0., 300.),
-    );
-    let mut enhanced = melon.clone();
-    enhanced.graft = Some(BounceMelon);
-    melon.graft = Some(SlimeBerry);
-    assert!(game.rebound(&mut melon) && game.rebound(&mut enhanced));
-    assert!(enhanced.velocity.y < melon.velocity.y && enhanced.energy_ratio > melon.energy_ratio);
-    assert_eq!(game.juice_zones[0].kind, Puddle::Slime);
-    for (graft, bites) in [(BowlingPumpkin, 4), (RedApple, 1)] {
-        let mut game = isolated_sandbox();
-        game.place_monster(MonsterKind::IronBoar, 200.);
-        let pos = game.monsters[0].pos;
-        let mut pumpkin = body_at(
-            &mut game,
-            BowlingPumpkin,
-            Stage::Mature,
-            pos,
-            Point::new(70., 0.),
-        );
-        pumpkin.graft = Some(graft);
-        pumpkin.rolling = true;
-        game.bodies.push(pumpkin);
-        game.step();
-        assert_eq!(game.barricades[0].hits_left, bites);
-        if graft == RedApple {
-            assert_eq!(game.juice_zones[0].kind, Puddle::Juice);
         }
     }
 }
@@ -358,22 +270,6 @@ fn awake_angled_apple_starts_one_swept_zero_damage_zoom_with_eight_second_cooldo
     }
     apple.pos = game.hellhound.unwrap().pos;
     assert!(game.feed_companion(&apple, apple.pos));
-}
-
-#[test]
-fn berry_with_apple_trait_leaves_both_slime_and_juice() {
-    let mut game = isolated_sandbox();
-    let mut berry = body_at(
-        &mut game,
-        SlimeBerry,
-        Stage::Giant,
-        Point::new(300., ground(300.) - 7.),
-        Point::new(0., 160.),
-    );
-    berry.graft = Some(RedApple);
-    assert!(!game.move_body(&mut berry));
-    assert!(game.juice_zones.iter().any(|z| z.kind == Puddle::Juice));
-    assert!(game.juice_zones.iter().any(|z| z.kind == Puddle::Slime));
 }
 
 #[test]
