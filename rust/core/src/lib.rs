@@ -1,5 +1,11 @@
 use std::collections::VecDeque;
 
+mod hellhound;
+mod levels;
+pub use hellhound::{Hellhound, HellhoundState};
+pub use levels::{CompanionDef, LevelDef, LevelId, SpawnGroup, TameFightDef, WaveDef};
+pub mod balance;
+
 pub const DT: f32 = 1.0 / 120.0;
 pub const TRELLIS_Y: f32 = 62.0;
 pub const SLOPE: f32 = 0.194;
@@ -9,7 +15,9 @@ const SPAWN_X: f32 = 486.0;
 const CHIEF_X: f32 = 62.0;
 const DOORWAY_REACH_RIGHT: f32 = 115.;
 const MAX_HP: u8 = 5;
-const BUD_TICKS: u32 = 36;
+pub const GREEN_CUT_RADIUS: f32 = 22.;
+const VINE_LENGTH: f32 = 18.;
+const MAX_SWAY: f32 = 18. * std::f32::consts::PI / 180.;
 const CHIME_COOLDOWN: u32 = 120;
 pub const HOME_RUN_COOLDOWN: u32 = 7 * 120;
 const DIGESTION_COOLDOWN: u32 = 15 * 120;
@@ -19,7 +27,9 @@ const HOME_RUN_SPEED: f32 = 440.;
 const HOME_RUN_APPROACH_SPEED: f32 = 310.;
 const HOME_RUN_MELON_ROLL_OUT: f32 = 120.;
 const HOME_RUN_MELON_IMPACT: f32 = 770.;
-const MELON_RESTITUTION: f32 = 0.64;
+const MELON_GRAVITY: f32 = 685.;
+const MELON_RESTITUTION: f32 = 0.78;
+const MELON_MONSTER_RESTITUTION: f32 = 0.88;
 const MELON_MIN_REBOUND: f32 = 115.;
 const ROT_TICKS: u32 = 840;
 const JUICE_TICKS: u32 = 720;
@@ -27,7 +37,6 @@ const JUICE_RADIUS: f32 = 28.0;
 const ROLL_THRESHOLD: f32 = 45.0;
 const SWIPE_DROP_SPEED: f32 = 90.0;
 const MAX_CUT_VX: f32 = 29.24277; // 90 * tan(18 degrees)
-const SANDBOX_REINFORCEMENT_DELAY: u32 = 600;
 
 pub fn ground(x: f32) -> f32 {
     155.0 + SLOPE * (x - 70.0)
@@ -71,10 +80,22 @@ pub enum FruitKind {
 impl FruitKind {
     pub fn growth_ticks(self) -> u32 {
         match self {
+            Self::RedApple => 504,
+            Self::BounceMelon => 744,
+            Self::BowlingPumpkin => 1260,
+        }
+    }
+
+    pub fn mature_ticks(self) -> u32 {
+        match self {
             Self::RedApple => 240,
             Self::BounceMelon => 384,
-            Self::BowlingPumpkin => 540,
+            Self::BowlingPumpkin => 660,
         }
+    }
+
+    pub fn hanging_ticks(self) -> u32 {
+        (self.mature_ticks() * 3).div_ceil(10)
     }
 
     fn radius(self) -> f32 {
@@ -118,7 +139,7 @@ impl Fruit {
         let growth = self.kind.growth_ticks();
         if self.age >= growth {
             Stage::Giant
-        } else if self.age * 2 >= growth {
+        } else if self.age >= self.kind.mature_ticks() {
             Stage::Mature
         } else {
             Stage::Small
@@ -126,7 +147,17 @@ impl Fruit {
     }
 
     pub fn hanging(self) -> bool {
-        self.age >= BUD_TICKS
+        self.age >= self.kind.hanging_ticks()
+    }
+
+    pub fn growth(self) -> f32 {
+        let mature = self.kind.mature_ticks();
+        if self.age < mature {
+            0.5 * self.age as f32 / mature as f32
+        } else {
+            0.5 + 0.5 * (self.age - mature) as f32 / (self.kind.growth_ticks() - mature) as f32
+        }
+        .min(1.)
     }
 }
 
@@ -134,6 +165,66 @@ impl Fruit {
 pub enum SlotItem {
     Fruit(Fruit),
     Chime { cooldown: u32 },
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VineSway {
+    /// Angle from vertical, positive toward the downhill side, in radians.
+    pub sway_angle: f32,
+    /// Angular velocity in radians per second.
+    pub sway_angular_vel: f32,
+}
+
+impl VineSway {
+    fn impulse(&mut self, impulse: f32) {
+        self.sway_angular_vel = (self.sway_angular_vel + impulse).clamp(-2.4, 2.4);
+    }
+
+    fn advance(&mut self, breeze: f32) {
+        self.sway_angular_vel +=
+            (breeze - 17. * self.sway_angle - 3.4 * self.sway_angular_vel) * DT;
+        let angle = self.sway_angle + self.sway_angular_vel * DT;
+        self.sway_angle = angle.clamp(-MAX_SWAY, MAX_SWAY);
+        if angle != self.sway_angle {
+            self.sway_angular_vel = 0.;
+        }
+    }
+
+    fn offset(self) -> Point {
+        Point::new(
+            VINE_LENGTH * self.sway_angle.sin(),
+            VINE_LENGTH * (self.sway_angle.cos() - 1.),
+        )
+    }
+
+    fn tangent(self) -> Point {
+        let speed = VINE_LENGTH * self.sway_angular_vel;
+        Point::new(
+            speed * self.sway_angle.cos(),
+            -speed * self.sway_angle.sin(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SlotSnapshot {
+    pub hook: Point,
+    pub fruit_center: Point,
+    pub item: Option<SlotItem>,
+    pub sway_angle: f32,
+    pub sway_angular_vel: f32,
+    pub cut_radius: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OrchardSnapshot {
+    pub level: LevelId,
+    pub phase: Phase,
+    pub wave: usize,
+    pub unlocked_slots: usize,
+    pub slots: [SlotSnapshot; SLOTS.len()],
+    pub hellhound: Option<Hellhound>,
+    pub companion_unlocked: bool,
 }
 
 impl From<FruitKind> for SlotItem {
@@ -150,11 +241,13 @@ pub struct Body {
     pub pos: Point,
     pub velocity: Point,
     pub bounces: u32,
+    pub combo_bounces: u32,
     pub rolling: bool,
     pub home_run: bool,
     home_run_lane_distance: f32,
     hit: Vec<u32>,
     trellis_contacts: u8,
+    trellis_grazes: u8,
 }
 
 impl Body {
@@ -176,12 +269,18 @@ impl Body {
 
     fn damage(&self, kind: MonsterKind) -> u8 {
         let base = match (self.kind, self.stage, kind) {
-            (_, Stage::Small, _) => 1,
+            (_, Stage::Small, _) | (FruitKind::BowlingPumpkin, _, MonsterKind::Shield) => return 1,
+            (FruitKind::BowlingPumpkin, Stage::Giant, MonsterKind::IronBoar) if self.rolling => 5,
+            (FruitKind::BowlingPumpkin, Stage::Mature, MonsterKind::IronBoar) if self.rolling => 3,
             (FruitKind::RedApple, Stage::Giant, MonsterKind::IronBoar) => 6,
             (FruitKind::RedApple, Stage::Giant, _) => 4,
+            (FruitKind::RedApple, Stage::Mature, MonsterKind::IronBoar) => 3,
             (FruitKind::RedApple, Stage::Mature, _) => 2,
-            (FruitKind::BounceMelon, Stage::Giant, _) => 2,
-            (FruitKind::BounceMelon, Stage::Mature, _) => 1,
+            (FruitKind::BounceMelon, Stage::Giant, MonsterKind::IronBoar) => 2,
+            (FruitKind::BounceMelon, Stage::Giant, MonsterKind::GreenSlime) => 2,
+            (FruitKind::BounceMelon, Stage::Mature, MonsterKind::IronBoar) => 1,
+            (FruitKind::BounceMelon, Stage::Giant, _) => 3,
+            (FruitKind::BounceMelon, Stage::Mature, _) => 2,
             (FruitKind::BowlingPumpkin, Stage::Giant, _) => 7,
             (FruitKind::BowlingPumpkin, Stage::Mature, _) => 5,
         };
@@ -201,7 +300,9 @@ impl Body {
 pub enum MonsterKind {
     GreenSlime,
     IronBoar,
+    /// The ElasticShield enemy, with a springy cap and exposed sides.
     Shield,
+    WildHellhound,
 }
 
 impl MonsterKind {
@@ -210,6 +311,7 @@ impl MonsterKind {
             Self::GreenSlime => 3,
             Self::IronBoar => 9,
             Self::Shield => 6,
+            Self::WildHellhound => 1,
         }
     }
 
@@ -218,14 +320,16 @@ impl MonsterKind {
             Self::GreenSlime => 7.,
             Self::IronBoar => 10.,
             Self::Shield => 9.,
+            Self::WildHellhound => 12.,
         }
     }
 
-    fn speed(self) -> f32 {
+    pub fn speed(self) -> f32 {
         match self {
             Self::GreenSlime => 29.,
             Self::IronBoar => 20.,
             Self::Shield => 24.,
+            Self::WildHellhound => 48.,
         }
     }
 }
@@ -239,6 +343,13 @@ pub struct Monster {
     knockback: f32,
     stride: u32,
     bite_cooldown: u32,
+    hit_companion: bool,
+}
+
+impl Monster {
+    pub fn horizontal_speed(&self) -> f32 {
+        self.knockback - self.kind.speed()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,8 +376,24 @@ pub enum VfxEvent {
     ChiefHit(Point),
     ChiefHeal(Point),
     ChiefBonk(Point),
-    HomeRunDash { from: Point, target: Point },
+    HomeRunDash {
+        from: Point,
+        target: Point,
+    },
     ShieldRebound(Point),
+    GreenCut(Point, FruitKind, f32),
+    GreenSplat(Point, FruitKind),
+    MelonCombo {
+        pos: Point,
+        combo_bounces: u32,
+        monster_hit: bool,
+    },
+    TameProgress(Point, u8, u8),
+    Tamed(Point),
+    HellhoundCharge(Point),
+    HellhoundHit(Point, u8),
+    HellhoundDizzy(Point),
+    HellhoundRevived(Point),
 }
 
 pub struct Protagonist {
@@ -333,6 +460,28 @@ pub struct JuiceZone {
     pub ticks_left: u32,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CombatContribution {
+    pub damage: u32,
+    pub kills: u32,
+}
+
+impl CombatContribution {
+    fn record(&mut self, damage: u8, killed: bool) {
+        self.damage += u32::from(damage);
+        self.kills += u32::from(killed);
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RunStats {
+    /// Damage actually removed from enemy HP, excluding overkill and taming.
+    pub fruits: [CombatContribution; 3],
+    pub hellhound: CombatContribution,
+    pub first_damage_tick: Option<u32>,
+    pub max_concurrent_monsters: usize,
+}
+
 pub struct Orchard {
     pub phase: Phase,
     pub wave: usize,
@@ -345,17 +494,44 @@ pub struct Orchard {
     pub juice_zones: Vec<JuiceZone>,
     pub monsters: Vec<Monster>,
     pub events: VecDeque<VfxEvent>,
+    pub hellhound: Option<Hellhound>,
+    pub companion_unlocked: bool,
+    pub stats: RunStats,
+    level: &'static LevelDef,
+    vines: [VineSway; SLOTS.len()],
+    seed: u64,
+    elapsed: u32,
     tick: u32,
-    spawned: u32,
+    spawned: Vec<u32>,
     next_id: u32,
 }
 
 impl Default for Orchard {
     fn default() -> Self {
+        Self::new(LevelId::T1, 0)
+    }
+}
+
+impl Orchard {
+    pub fn new(id: LevelId, seed: u64) -> Self {
+        let level = LevelDef::load(id);
+        let sandbox = id == LevelId::Sandbox;
         let mut slots = [None; SLOTS.len()];
-        slots[..2].fill(Some(FruitKind::RedApple.into()));
-        Self {
-            phase: Phase::Wave,
+        let fruit_slots = slots
+            .iter_mut()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != level.initial_chime_slot);
+        for ((_, slot), &kind) in fruit_slots.zip(level.initial_plants) {
+            *slot = Some(SlotItem::Fruit(Fruit {
+                kind,
+                age: if sandbox { kind.growth_ticks() } else { 0 },
+            }));
+        }
+        if let Some(slot) = level.initial_chime_slot {
+            slots[slot] = Some(SlotItem::Chime { cooldown: 0 });
+        }
+        let mut orchard = Self {
+            phase: if sandbox { Phase::Sandbox } else { Phase::Wave },
             wave: 1,
             protagonist: Protagonist {
                 hp: MAX_HP,
@@ -364,7 +540,7 @@ impl Default for Orchard {
                 invulnerability_ticks: 0,
                 hit_flash: 0,
             },
-            unlocked_slots: 2,
+            unlocked_slots: level.initial_unlocked_slots,
             slots,
             reserve: Vec::new(),
             bodies: Vec::new(),
@@ -372,42 +548,139 @@ impl Default for Orchard {
             juice_zones: Vec::new(),
             monsters: Vec::new(),
             events: VecDeque::new(),
+            level,
+            hellhound: level
+                .companion
+                .filter(|_| level.companion_enabled)
+                .map(|config| Hellhound::companion(config.stamina)),
+            companion_unlocked: level.companion_enabled,
+            stats: RunStats::default(),
+            vines: [VineSway::default(); SLOTS.len()],
+            seed,
+            elapsed: 0,
             tick: 0,
-            spawned: 0,
+            spawned: vec![0; level.waves.first().map_or(1, |wave| wave.spawns.len())],
             next_id: 1,
+        };
+        if sandbox {
+            orchard.reserve.push(SlotItem::Fruit(Fruit {
+                kind: FruitKind::BounceMelon,
+                age: FruitKind::BounceMelon.growth_ticks(),
+            }));
+            for &(kind, x) in level.sandbox_opening {
+                orchard.spawn(kind, x);
+            }
+        }
+        orchard
+    }
+
+    pub fn sandbox(&mut self) {
+        *self = Self::new(LevelId::Sandbox, self.seed);
+    }
+
+    pub fn set_sandbox_companion(&mut self, enabled: bool) -> bool {
+        if self.phase != Phase::Sandbox {
+            return false;
+        }
+        if enabled {
+            let config = self.level.companion.unwrap();
+            self.hellhound
+                .get_or_insert_with(|| Hellhound::companion(config.stamina));
+        } else {
+            self.hellhound = None;
+        }
+        true
+    }
+
+    pub fn level(&self) -> &'static LevelDef {
+        self.level
+    }
+
+    pub fn next_level(&mut self) -> bool {
+        if self.phase != Phase::Victory {
+            return false;
+        }
+        let Some(next) = self.level.next_level() else {
+            return false;
+        };
+        *self = Self::new(next, self.seed);
+        true
+    }
+
+    fn can_equip(&self, slot: usize) -> bool {
+        slot < self.unlocked_slots
+            && (matches!(self.phase, Phase::Intermission | Phase::Sandbox)
+                || self.phase == Phase::Wave && self.elapsed == 0)
+    }
+
+    pub fn equip_plant(&mut self, slot: usize, kind: FruitKind) -> bool {
+        if !self.can_equip(slot) || !self.level.available_plants.contains(&kind) {
+            return false;
+        }
+        if !matches!(self.slots[slot], Some(SlotItem::Fruit(fruit)) if fruit.kind == kind) {
+            self.slots[slot] = Some(kind.into());
+        }
+        true
+    }
+
+    pub fn equip_chime(&mut self, slot: usize) -> bool {
+        if !self.can_equip(slot) || self.level.initial_chime_slot.is_none() {
+            return false;
+        }
+        if let Some(from) = self
+            .slots
+            .iter()
+            .position(|item| matches!(item, Some(SlotItem::Chime { .. })))
+        {
+            self.slots.swap(from, slot);
+        } else if let Some(index) = self
+            .reserve
+            .iter()
+            .position(|item| matches!(item, SlotItem::Chime { .. }))
+        {
+            let chime = self.reserve.remove(index);
+            if let Some(plant) = self.slots[slot].replace(chime) {
+                self.reserve.push(plant);
+            }
+        } else {
+            self.slots[slot] = Some(SlotItem::Chime { cooldown: 0 });
+        }
+        true
+    }
+
+    pub fn slot_snapshot(&self, slot: usize) -> SlotSnapshot {
+        let sway = self.vines[slot];
+        let hook = Point::new(SLOTS[slot], TRELLIS_Y - VINE_LENGTH);
+        let offset = sway.offset();
+        let item = self.slots[slot];
+        SlotSnapshot {
+            hook,
+            fruit_center: Point::new(hook.x + offset.x, TRELLIS_Y + offset.y),
+            item,
+            sway_angle: sway.sway_angle,
+            sway_angular_vel: sway.sway_angular_vel,
+            cut_radius: match item {
+                Some(SlotItem::Fruit(fruit)) if slot < self.unlocked_slots && fruit.hanging() => {
+                    Some(if fruit.stage() == Stage::Small {
+                        GREEN_CUT_RADIUS
+                    } else {
+                        19.
+                    })
+                }
+                _ => None,
+            },
         }
     }
-}
 
-impl Orchard {
-    pub fn sandbox(&mut self) {
-        use FruitKind::*;
-        *self = Self::default();
-        self.phase = Phase::Sandbox;
-        self.unlocked_slots = SLOTS.len();
-        let giant = |kind: FruitKind| {
-            SlotItem::Fruit(Fruit {
-                kind,
-                age: kind.growth_ticks(),
-            })
-        };
-        self.slots = [
-            giant(RedApple),
-            giant(BounceMelon),
-            giant(BowlingPumpkin),
-            SlotItem::Chime { cooldown: 0 },
-            giant(RedApple),
-            giant(BowlingPumpkin),
-        ]
-        .map(Some);
-        self.reserve.push(giant(BounceMelon));
-        // The opening shield is positioned so a Giant pumpkin in the last slot can park on impact.
-        for (kind, x) in [
-            (MonsterKind::GreenSlime, 275.),
-            (MonsterKind::IronBoar, 350.),
-            (MonsterKind::Shield, 423.),
-        ] {
-            self.spawn(kind, x);
+    pub fn snapshot(&self) -> OrchardSnapshot {
+        OrchardSnapshot {
+            level: self.level.id,
+            phase: self.phase,
+            wave: self.wave,
+            unlocked_slots: self.unlocked_slots,
+            slots: std::array::from_fn(|slot| self.slot_snapshot(slot)),
+            hellhound: self.hellhound,
+            companion_unlocked: self.companion_unlocked,
         }
     }
 
@@ -461,7 +734,7 @@ impl Orchard {
         self.phase = Phase::Wave;
         self.wave += 1;
         self.tick = 0;
-        self.spawned = 0;
+        self.spawned = vec![0; self.level.waves[self.wave - 1].spawns.len()];
         true
     }
 
@@ -482,6 +755,33 @@ impl Orchard {
         self.drop_fruit(slot, vx.clamp(-MAX_CUT_VX, MAX_CUT_VX))
     }
 
+    pub fn click_cut(&mut self, point: Point) -> bool {
+        let slot = (0..self.unlocked_slots)
+            .filter_map(|slot| {
+                let view = self.slot_snapshot(slot);
+                let distance = point.distance_squared(view.fruit_center);
+                (distance <= view.cut_radius?.powi(2)).then_some((slot, distance))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        slot.is_some_and(|(slot, _)| self.cut_fruit(slot))
+    }
+
+    pub fn slash_cut(&mut self, from: Point, to: Point, vx: f32) -> usize {
+        if !self.active() || !vx.is_finite() {
+            return 0;
+        }
+        let targets: [bool; SLOTS.len()] = std::array::from_fn(|slot| {
+            let view = self.slot_snapshot(slot);
+            view.cut_radius
+                .is_some_and(|radius| view.fruit_center.within_segment(from, to, radius))
+        });
+        targets
+            .into_iter()
+            .enumerate()
+            .filter(|&(slot, hit)| hit && self.cut_fruit_angled(slot, vx))
+            .count()
+    }
+
     fn drop_fruit(&mut self, slot: usize, vx: f32) -> bool {
         if slot >= self.unlocked_slots {
             return false;
@@ -492,24 +792,39 @@ impl Orchard {
         if !fruit.hanging() {
             return false;
         }
-        let pos = Point::new(SLOTS[slot], TRELLIS_Y);
+        let pos = self.slot_snapshot(slot).fruit_center;
+        let tangent = self.vines[slot].tangent();
+        let velocity = Point::new(
+            tangent.x + vx,
+            tangent.y + if vx == 0. { 0. } else { SWIPE_DROP_SPEED },
+        );
         let id = self.id();
         self.bodies.push(Body {
             id,
             pos,
             kind: fruit.kind,
             stage: fruit.stage(),
-            velocity: Point::new(vx, if vx == 0. { 0. } else { SWIPE_DROP_SPEED }),
+            velocity,
             bounces: 0,
+            combo_bounces: 0,
             rolling: false,
             home_run: false,
             home_run_lane_distance: 0.,
             hit: Vec::new(),
             trellis_contacts: 0,
+            trellis_grazes: 0,
         });
         self.slots[slot] = Some(fruit.kind.into());
-        self.events
-            .push_back(VfxEvent::FruitCut(pos, fruit.kind, vx));
+        for neighbor in [slot.wrapping_sub(1), slot + 1] {
+            if neighbor < self.unlocked_slots {
+                self.vines[neighbor].impulse(if neighbor < slot { -1.05 } else { 1.05 });
+            }
+        }
+        self.events.push_back(if fruit.stage() == Stage::Small {
+            VfxEvent::GreenCut(pos, fruit.kind, velocity.x)
+        } else {
+            VfxEvent::FruitCut(pos, fruit.kind, velocity.x)
+        });
         true
     }
 
@@ -565,6 +880,13 @@ impl Orchard {
         });
         self.events
             .push_back(VfxEvent::ChimeRing(Point::new(SLOTS[slot], TRELLIS_Y)));
+        for (index, vine) in self.vines[..self.unlocked_slots].iter_mut().enumerate() {
+            let distance = index.abs_diff(slot);
+            if distance > 0 {
+                let direction = if index < slot { -1. } else { 1. };
+                vine.impulse(direction * 2.2 / distance as f32);
+            }
+        }
         for neighbor in [slot.wrapping_sub(1), slot + 1] {
             if neighbor >= self.unlocked_slots {
                 continue;
@@ -582,6 +904,7 @@ impl Orchard {
     fn hit_trellis(&mut self, body: &mut Body, old: Point) {
         for (slot, x) in SLOTS.into_iter().take(self.unlocked_slots).enumerate() {
             let pos = Point::new(x, TRELLIS_Y);
+            let fruit_center = self.slot_snapshot(slot).fruit_center;
             let mask = 1 << slot;
             if body.trellis_contacts & mask != 0 {
                 continue;
@@ -595,19 +918,45 @@ impl Orchard {
                 }
                 Some(SlotItem::Fruit(fruit))
                     if body.kind == FruitKind::BounceMelon
+                        && body.stage != Stage::Small
+                        && body.bounces > 0
                         && fruit.hanging()
-                        && pos.within_segment(
+                        && fruit_center.within_segment(
                             old,
                             body.pos,
                             body.radius() + fruit.kind.radius() * fruit.stage().scale(),
                         ) =>
                 {
                     body.trellis_contacts |= mask;
+                    self.vines[slot].impulse(self.graze_impulse(slot, body));
                     self.drop_fruit(slot, 0.);
-                    self.events.push_back(VfxEvent::TrellisKnock(pos));
+                    self.events.push_back(VfxEvent::TrellisKnock(fruit_center));
+                }
+                Some(SlotItem::Fruit(_))
+                    if body.kind == FruitKind::BounceMelon
+                        && body.stage != Stage::Small
+                        && body.bounces > 0
+                        && body.trellis_grazes & mask == 0
+                        && Point::new(fruit_center.x, fruit_center.y + 13.).within_segment(
+                            old,
+                            body.pos,
+                            body.radius() + 6.,
+                        ) =>
+                {
+                    body.trellis_grazes |= mask;
+                    let impulse = self.graze_impulse(slot, body);
+                    self.vines[slot].impulse(impulse);
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn graze_impulse(&self, slot: usize, body: &Body) -> f32 {
+        if body.pos.x < SLOTS[slot] {
+            1.45
+        } else {
+            -1.45
         }
     }
 
@@ -622,18 +971,28 @@ impl Orchard {
             return self.shatter(body);
         }
         self.launch_melon_rebound(body, speed);
-        self.events.push_back(VfxEvent::MelonBounce(body.pos));
+        self.melon_bounce_event(body, false);
         true
+    }
+
+    fn melon_bounce_event(&mut self, body: &Body, monster_hit: bool) {
+        self.events.push_back(VfxEvent::MelonBounce(body.pos));
+        self.events.push_back(VfxEvent::MelonCombo {
+            pos: body.pos,
+            combo_bounces: body.combo_bounces,
+            monster_hit,
+        });
     }
 
     fn launch_melon_rebound(&self, body: &mut Body, speed: f32) {
         body.bounces += 1;
+        body.combo_bounces += 1;
         body.home_run = false;
         body.velocity.y = -speed;
-        body.velocity.x = if body.pos.x < 460. { 13. } else { -13. };
+        body.velocity.x = if body.pos.x < 460. { 34. } else { -24. };
         let rise = body.pos.y - TRELLIS_Y;
-        let effective_speed = speed - GRAVITY * DT / 2.;
-        let discriminant = effective_speed * effective_speed - 2. * GRAVITY * rise;
+        let effective_speed = speed - MELON_GRAVITY * DT / 2.;
+        let discriminant = effective_speed * effective_speed - 2. * MELON_GRAVITY * rise;
         if rise > 0. && discriminant >= 0. {
             let target = SLOTS
                 .iter()
@@ -651,11 +1010,15 @@ impl Orchard {
         }
         body.hit.clear();
         body.trellis_contacts = 0;
+        body.trellis_grazes = 0;
     }
 
     fn shatter(&mut self, body: &Body) -> bool {
-        self.events
-            .push_back(VfxEvent::FruitShatter(body.pos, body.kind, body.stage));
+        self.events.push_back(if body.stage == Stage::Small {
+            VfxEvent::GreenSplat(body.pos, body.kind)
+        } else {
+            VfxEvent::FruitShatter(body.pos, body.kind, body.stage)
+        });
         false
     }
 
@@ -723,7 +1086,8 @@ impl Orchard {
                 1.
             };
             body.velocity.x = (body.velocity.x
-                + traction * GRAVITY * SLOPE / (1. + SLOPE * SLOPE) * DT)
+                + traction * self.level.rolling_friction * GRAVITY * SLOPE / (1. + SLOPE * SLOPE)
+                    * DT)
                 .min(body.roll_speed_cap());
             body.velocity.y = body.velocity.x * SLOPE;
             body.pos.x += body.velocity.x * DT;
@@ -744,7 +1108,11 @@ impl Orchard {
                 }
             }
         } else {
-            body.velocity.y += GRAVITY * DT;
+            body.velocity.y += if body.kind == FruitKind::BounceMelon {
+                MELON_GRAVITY
+            } else {
+                GRAVITY
+            } * DT;
             body.pos.x += body.velocity.x * DT;
             body.pos.y += body.velocity.y * DT;
         }
@@ -756,10 +1124,16 @@ impl Orchard {
             return true;
         }
 
+        if self.feed_companion(body, old) {
+            return false;
+        }
         if let Some(event) = self.protagonist.interact(body, old) {
-            let bonked = matches!(event, VfxEvent::ChiefBonk(_));
+            if matches!(event, VfxEvent::ChiefBonk(_)) {
+                self.events.push_back(event);
+                return self.shatter(body);
+            }
             self.events.push_back(event);
-            return bonked && self.shatter(body);
+            return false;
         }
         if let Some(survives) = self.try_barricade_hit(body, old) {
             return survives;
@@ -775,6 +1149,7 @@ impl Orchard {
                 if body.kind == FruitKind::BounceMelon {
                     let speed = body.velocity.y * 1.5;
                     self.launch_melon_rebound(body, speed);
+                    self.melon_bounce_event(body, true);
                 } else {
                     body.velocity.x *= 1.5;
                     body.velocity.y *= -1.5;
@@ -794,28 +1169,39 @@ impl Orchard {
                 continue;
             }
             let damage = body.damage(monster.kind);
-            monster.hp = monster.hp.saturating_sub(damage);
-            monster.knockback += body.push()
-                / if monster.kind == MonsterKind::IronBoar {
-                    2.1
-                } else {
-                    1.
+            let (id, kind, pos) = (monster.id, monster.kind, monster.pos);
+            let combo_push = if body.kind == FruitKind::BounceMelon {
+                1. + 0.10 * body.combo_bounces.min(6) as f32
+            } else {
+                1.
+            };
+            monster.knockback += body.push() * combo_push
+                / match kind {
+                    MonsterKind::Shield if body.kind == FruitKind::BowlingPumpkin => 2.8,
+                    MonsterKind::IronBoar => 2.1,
+                    MonsterKind::WildHellhound => 1.6,
+                    _ => 1.,
                 };
-            body.hit.push(monster.id);
-            self.events.push_back(VfxEvent::MonsterHit(
-                monster.pos,
-                damage,
-                body.stage == Stage::Giant,
-            ));
-            if monster.hp == 0 {
-                self.events.push_back(VfxEvent::MonsterDie(monster.pos));
+            body.hit.push(id);
+            if kind == MonsterKind::WildHellhound {
+                self.tame_hit(body, pos, damage);
+            } else {
+                let actual_damage = damage.min(monster.hp);
+                monster.hp -= actual_damage;
+                self.stats.fruits[body.kind as usize].record(actual_damage, monster.hp == 0);
+                self.events.push_back(VfxEvent::MonsterHit(
+                    pos,
+                    actual_damage,
+                    body.stage == Stage::Giant,
+                ));
+                if monster.hp == 0 {
+                    self.events.push_back(VfxEvent::MonsterDie(pos));
+                }
             }
             if body.stage == Stage::Small {
                 return self.shatter(body);
             }
-            if body.home_run
-                && monster.kind == MonsterKind::GreenSlime
-                && body.kind != FruitKind::BowlingPumpkin
+            if body.home_run && kind == MonsterKind::GreenSlime && body.kind == FruitKind::RedApple
             {
                 body.velocity.x *= 0.98;
                 body.velocity.y *= 0.98;
@@ -823,13 +1209,25 @@ impl Orchard {
             }
             match body.kind {
                 FruitKind::RedApple => return self.shatter(body),
-                FruitKind::BounceMelon => return self.rebound(body),
+                FruitKind::BounceMelon => {
+                    let impact = if body.home_run {
+                        HOME_RUN_MELON_IMPACT
+                    } else {
+                        body.velocity.y
+                    };
+                    self.launch_melon_rebound(body, impact * MELON_MONSTER_RESTITUTION);
+                    body.velocity.x = -24.;
+                    body.hit.push(id);
+                    self.melon_bounce_event(body, true);
+                    return true;
+                }
                 FruitKind::BowlingPumpkin => {
                     self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
                     if body.rolling || body.home_run {
-                        let retained_speed = match (body.stage, monster.kind) {
+                        let retained_speed = match (body.stage, kind) {
                             (Stage::Giant, MonsterKind::GreenSlime) => 0.92,
                             (_, MonsterKind::GreenSlime) => 0.88,
+                            (_, MonsterKind::Shield) => 0.08,
                             (Stage::Giant, _) => 0.60,
                             (_, _) => 0.45,
                         };
@@ -838,6 +1236,9 @@ impl Orchard {
                         if body.velocity.x < ROLL_THRESHOLD {
                             break;
                         }
+                    } else {
+                        body.pos.y = ground(body.pos.x) - radius;
+                        break;
                     }
                 }
             }
@@ -872,23 +1273,51 @@ impl Orchard {
 
     fn spawn(&mut self, kind: MonsterKind, x: f32) {
         let id = self.id();
+        let pos = Point::new(x, ground(x) - kind.radius());
+        if kind == MonsterKind::WildHellhound {
+            self.hellhound = self
+                .level
+                .tame_fight
+                .map(|fight| Hellhound::wild(pos, fight.resolve));
+        }
         self.monsters.push(Monster {
             id,
             kind,
             hp: kind.hp(),
-            pos: Point::new(x, ground(x) - kind.radius()),
+            pos,
             knockback: 0.,
             stride: 0,
             bite_cooldown: 0,
+            hit_companion: false,
         });
+        self.stats.max_concurrent_monsters =
+            self.stats.max_concurrent_monsters.max(self.monsters.len());
     }
 
-    fn wave_rules(&self) -> (u32, u32, u32) {
-        match self.wave {
-            1 => (8, 285, 2880),
-            2 => (12, 218, 3060),
-            3 => (14, 195, 3220),
-            _ => (21, 146, 3700),
+    fn spawn_due(&mut self, groups: &[SpawnGroup]) {
+        for (index, group) in groups.iter().enumerate() {
+            let ordinal = self.spawned[index];
+            if ordinal >= group.count {
+                continue;
+            }
+            // Independent, stable jitter keeps the same level seed across every strategy.
+            let mut key = self
+                .seed
+                .wrapping_add((self.wave as u64) << 40)
+                .wrapping_add((index as u64) << 32)
+                .wrapping_add(u64::from(ordinal))
+                .wrapping_add(0x9e3779b97f4a7c15);
+            key = (key ^ (key >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            key = (key ^ (key >> 27)).wrapping_mul(0x94d049bb133111eb);
+            let jitter = (key ^ (key >> 31)) % (u64::from(group.jitter) + 1);
+            let due = u64::from(group.first_tick)
+                + u64::from(ordinal) * u64::from(group.interval)
+                + jitter;
+            if u64::from(self.tick) >= due {
+                let kind = group.pattern[ordinal as usize % group.pattern.len()];
+                self.spawn(kind, SPAWN_X);
+                self.spawned[index] += 1;
+            }
         }
     }
 
@@ -904,31 +1333,17 @@ impl Orchard {
     }
 
     fn end_wave(&mut self) {
-        use FruitKind::*;
-        if self.wave == 4 {
+        let Some(next) = self.level.waves.get(self.wave) else {
             self.phase = Phase::Victory;
             return;
-        }
+        };
         self.phase = Phase::Intermission;
         self.bodies.clear();
         self.barricades.clear();
         self.juice_zones.clear();
-        match self.wave {
-            1 => {
-                self.unlocked_slots = 3;
-                self.grant(BounceMelon.into());
-            }
-            2 => {
-                self.unlocked_slots = 5;
-                self.grant(SlotItem::Chime { cooldown: 0 });
-                self.grant(BowlingPumpkin.into());
-            }
-            3 => {
-                self.unlocked_slots = 6;
-                self.grant(BowlingPumpkin.into());
-                self.grant(BounceMelon.into());
-            }
-            _ => unreachable!(),
+        self.unlocked_slots = next.unlocked_slots;
+        for &kind in next.new_plants {
+            self.grant(kind.into());
         }
     }
 
@@ -960,9 +1375,17 @@ impl Orchard {
             let old_x = monster.pos.x;
             let slippery = Self::slippery(&self.juice_zones, old_x);
             let slide = if slippery { 1.65 } else { 1. };
-            let mut x = (old_x + (monster.knockback * slide - monster.kind.speed()) * DT)
-                .min(SPAWN_X + 10.);
-            monster.knockback *= if slippery { 0.993 } else { 0.976 };
+            let speed = if monster.kind == MonsterKind::WildHellhound {
+                self.level.tame_fight.unwrap().charge_speed
+            } else {
+                monster.kind.speed()
+            };
+            let mut x = (old_x + (monster.knockback * slide - speed) * DT).min(SPAWN_X + 10.);
+            monster.knockback *= if slippery {
+                0.993
+            } else {
+                self.level.knockback_retention
+            };
             let mut blocked = false;
             if x < old_x {
                 let contact = self
@@ -1000,6 +1423,11 @@ impl Orchard {
                 0.
             };
             monster.pos = Point::new(x, ground(x) - monster.kind.radius() - lift);
+            if monster.kind == MonsterKind::WildHellhound {
+                if let Some(dog) = &mut self.hellhound {
+                    dog.pos = monster.pos;
+                }
+            }
         }
         self.barricades.retain(|barrier| barrier.hits_left > 0);
     }
@@ -1008,27 +1436,26 @@ impl Orchard {
         if !self.active() {
             return;
         }
-        let (count, interval, duration) = self.wave_rules();
         let sandbox = self.phase == Phase::Sandbox;
-        if sandbox
-            && self.tick >= SANDBOX_REINFORCEMENT_DELAY
-            && (self.tick - SANDBOX_REINFORCEMENT_DELAY) % 128 == 0
-            || !sandbox && self.spawned < count && self.tick == 120 + self.spawned * interval
-        {
-            let kind = match self.spawned % 3 {
-                1 if sandbox || self.wave >= 3 => MonsterKind::IronBoar,
-                2 if sandbox || self.wave >= 3 => MonsterKind::Shield,
-                _ => MonsterKind::GreenSlime,
-            };
-            self.spawn(kind, SPAWN_X);
-            self.spawned += 1;
-        }
+        let level = self.level;
+        let groups = if sandbox {
+            level.sandbox_reinforcements.as_slice()
+        } else {
+            level.waves[self.wave - 1].spawns
+        };
+        self.spawn_due(groups);
         self.tick += 1;
+        self.elapsed += 1;
         self.protagonist.home_run_cooldown = self.protagonist.home_run_cooldown.saturating_sub(1);
         self.protagonist.digestion_cooldown = self.protagonist.digestion_cooldown.saturating_sub(1);
         self.protagonist.hit_flash = self.protagonist.hit_flash.saturating_sub(1);
 
         for slot in 0..self.unlocked_slots {
+            let t = self.elapsed as f32 * DT;
+            let phase = (self.seed % 101) as f32 * 0.16 + slot as f32 * 1.2;
+            let breeze =
+                self.level.wind_base * ((2.3 * t + phase).sin() + 0.4 * (3.7 * t + phase).sin());
+            self.vines[slot].advance(breeze);
             match &mut self.slots[slot] {
                 Some(SlotItem::Fruit(fruit)) => {
                     fruit.age += 1;
@@ -1048,6 +1475,7 @@ impl Orchard {
 
         self.update_barricades();
         self.move_monsters();
+        self.update_companion();
         for mut body in std::mem::take(&mut self.bodies) {
             if self.move_body(&mut body) {
                 if body.rolling && body.velocity.x < ROLL_THRESHOLD {
@@ -1057,7 +1485,7 @@ impl Orchard {
                     self.barricades.push(Barricade {
                         body,
                         age: 0,
-                        hits_left: 3,
+                        hits_left: 2,
                     });
                 } else {
                     self.bodies.push(body);
@@ -1065,6 +1493,15 @@ impl Orchard {
             }
         }
 
+        let tamed = self
+            .hellhound
+            .is_some_and(|dog| matches!(dog.state, HellhoundState::Tamed));
+        if tamed {
+            self.monsters
+                .retain(|monster| monster.kind != MonsterKind::WildHellhound);
+            self.phase = Phase::Victory;
+            return;
+        }
         self.monsters.retain_mut(|monster| {
             if monster.hp == 0 {
                 return false;
@@ -1075,9 +1512,19 @@ impl Orchard {
                     return true;
                 }
                 self.protagonist.hp = self.protagonist.hp.saturating_sub(1);
+                self.stats.first_damage_tick.get_or_insert(self.elapsed);
                 self.protagonist.hit_flash = 24;
                 self.events
                     .push_back(VfxEvent::ChiefHit(self.protagonist.position()));
+                if monster.kind == MonsterKind::WildHellhound {
+                    let x = level.tame_fight.unwrap().retreat_x;
+                    monster.pos = Point::new(x, ground(x) - monster.kind.radius());
+                    monster.knockback = 0.;
+                    if let Some(dog) = &mut self.hellhound {
+                        dog.pos = monster.pos;
+                    }
+                    return true;
+                }
                 return false;
             }
             true
@@ -1092,7 +1539,13 @@ impl Orchard {
                 self.phase = Phase::Defeat;
             }
         }
-        if self.phase == Phase::Wave && self.tick >= duration && self.monsters.is_empty() {
+        if self.phase == Phase::Wave
+            && self.monsters.is_empty()
+            && groups
+                .iter()
+                .zip(&self.spawned)
+                .all(|(group, &count)| count == group.count)
+        {
             self.end_wave();
         }
     }
@@ -1102,10 +1555,18 @@ impl Orchard {
 mod tests {
     use super::*;
 
+    fn isolated_sandbox() -> Orchard {
+        let mut orchard = Orchard::new(LevelId::Sandbox, 0);
+        orchard.set_sandbox_companion(false);
+        orchard.monsters.clear();
+        orchard.spawned[0] = u32::MAX;
+        orchard
+    }
+
     fn set_fruit(orchard: &mut Orchard, slot: usize, kind: FruitKind, stage: Stage) {
         let age = match stage {
-            Stage::Small => BUD_TICKS,
-            Stage::Mature => kind.growth_ticks() / 2,
+            Stage::Small => kind.hanging_ticks(),
+            Stage::Mature => kind.mature_ticks(),
             Stage::Giant => kind.growth_ticks(),
         };
         orchard.slots[slot] = Some(SlotItem::Fruit(Fruit { kind, age }));
@@ -1116,6 +1577,307 @@ mod tests {
             Some(SlotItem::Fruit(fruit)) => fruit.stage(),
             _ => panic!("missing fruit in slot {slot}"),
         }
+    }
+
+    #[test]
+    fn growth_thresholds_match_each_crop_and_green_hitboxes_work_for_both_inputs() {
+        for (kind, mature, giant) in [
+            (FruitKind::RedApple, 240, 504),
+            (FruitKind::BounceMelon, 384, 744),
+            (FruitKind::BowlingPumpkin, 660, 1260),
+        ] {
+            let fruit = |age| Fruit { kind, age };
+            assert_eq!((kind.mature_ticks(), kind.growth_ticks()), (mature, giant));
+            assert_eq!(fruit(mature - 1).stage(), Stage::Small);
+            assert_eq!(fruit(mature).stage(), Stage::Mature);
+            assert_eq!(fruit(mature).growth(), 0.5);
+            assert_eq!(fruit(giant - 1).stage(), Stage::Mature);
+            assert_eq!(fruit(giant).stage(), Stage::Giant);
+            assert_eq!(fruit(giant).growth(), 1.);
+            let mut orchard = Orchard::default();
+            let first = kind.hanging_ticks();
+            orchard.slots[0] = Some(SlotItem::Fruit(fruit(first - 1)));
+            assert!(fruit(first - 1).growth() < 0.15);
+            assert!(!orchard.click_cut(Point::new(SLOTS[0], TRELLIS_Y)));
+            assert!(fruit(first).growth() >= 0.15);
+            for slash in [false, true] {
+                orchard.slots[0] = Some(SlotItem::Fruit(fruit(first)));
+                let view = orchard.snapshot().slots[0];
+                assert!(view.cut_radius.unwrap() >= 22.);
+                let y = view.fruit_center.y + 22.;
+                let x = view.fruit_center.x;
+                if slash {
+                    assert_eq!(
+                        orchard.slash_cut(Point::new(x - 7., y), Point::new(x + 7., y), 15.),
+                        1
+                    );
+                } else {
+                    assert!(orchard.click_cut(Point::new(x, y)));
+                }
+                assert_eq!(orchard.bodies.last().unwrap().stage, Stage::Small);
+                assert!(
+                    matches!(orchard.events.back(), Some(VfxEvent::GreenCut(_, event_kind, _)) if *event_kind == kind)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vine_wind_neighbor_cut_chime_and_graze_excite_sway_and_drops_inherit_tangent() {
+        let mut orchard = isolated_sandbox();
+        let mut peak = 0_f32;
+        for _ in 0..120 {
+            orchard.step();
+            peak = peak.max(orchard.snapshot().slots[0].sway_angle.abs());
+        }
+        assert!((0.01..MAX_SWAY).contains(&peak));
+        let before = orchard.vines[1].sway_angular_vel;
+        assert!(orchard.cut_fruit(0));
+        assert!(orchard.vines[1].sway_angular_vel > before);
+        let before = orchard.vines[2].sway_angular_vel;
+        orchard.ring(3);
+        assert!(orchard.vines[2].sway_angular_vel < before);
+        let mut peak: f32 = 0.;
+        for _ in 0..100 {
+            orchard.step();
+            peak = peak.max(orchard.vines[2].sway_angle.abs());
+        }
+        assert!((8_f32.to_radians()..=MAX_SWAY).contains(&peak));
+
+        let center = orchard.slot_snapshot(1).fruit_center;
+        let mut melon = body_at(
+            &mut orchard,
+            FruitKind::BounceMelon,
+            Stage::Giant,
+            Point::new(center.x, center.y + 17.),
+            Point::new(0., -195.),
+        );
+        melon.bounces = 1;
+        let before = orchard.vines[1].sway_angular_vel;
+        assert!(orchard.move_body(&mut melon));
+        assert_ne!(orchard.vines[1].sway_angular_vel, before);
+        set_fruit(&mut orchard, 1, FruitKind::RedApple, Stage::Mature);
+        let sway = orchard.vines[1];
+        let tangent = sway.tangent();
+        let center = orchard.slot_snapshot(1).fruit_center;
+        assert!(orchard.cut_fruit_angled(1, 15.));
+        let body = orchard.bodies.last().unwrap();
+        assert_eq!((body.pos.x, body.pos.y), (center.x, center.y));
+        assert_eq!(body.velocity.x, tangent.x + 15.);
+        assert_eq!(body.velocity.y, tangent.y + SWIPE_DROP_SPEED);
+    }
+
+    #[test]
+    fn melon_monster_rebound_biases_uphill_and_increments_combo_knockback() {
+        let mut pushes = Vec::new();
+        for previous_combo in [0, 3] {
+            let mut orchard = Orchard::default();
+            orchard.spawn(MonsterKind::GreenSlime, 212.);
+            let pos = orchard.monsters[0].pos;
+            let mut body = body_at(
+                &mut orchard,
+                FruitKind::BounceMelon,
+                Stage::Mature,
+                Point::new(pos.x, pos.y - 9.),
+                Point::new(34., 250.),
+            );
+            body.combo_bounces = previous_combo;
+            assert!(orchard.move_body(&mut body));
+            assert!(body.velocity.x < 0.);
+            assert_eq!(
+                body.velocity.y,
+                -(250. + MELON_GRAVITY * DT) * MELON_MONSTER_RESTITUTION
+            );
+            assert_eq!(body.combo_bounces, previous_combo + 1);
+            assert!(
+                matches!(orchard.events.back(), Some(VfxEvent::MelonCombo {combo_bounces, monster_hit: true, ..})
+                if *combo_bounces == previous_combo + 1)
+            );
+            pushes.push(orchard.monsters[0].knockback);
+        }
+        assert!(pushes[1] > pushes[0]);
+    }
+
+    #[test]
+    fn level_definitions_load_expected_content_and_allow_duplicate_plants() {
+        let mut t1 = Orchard::new(LevelId::T1, 42);
+        assert_eq!(t1.level().display_name, "初遇黑狼");
+        assert_eq!(t1.snapshot().unlocked_slots, 2);
+        assert!(!t1.equip_plant(0, FruitKind::BowlingPumpkin));
+        assert!(!t1.equip_chime(0));
+        assert!(t1.hellhound.is_none());
+        let t2 = Orchard::new(LevelId::T2, 42);
+        assert_eq!(t2.level().display_name, "节奏压测");
+        assert!(t2.hellhound.is_some());
+        assert!(t2
+            .level()
+            .waves
+            .iter()
+            .flat_map(|wave| wave.spawns)
+            .any(|group| group.pattern.contains(&MonsterKind::Shield)));
+        let mut sandbox = Orchard::new(LevelId::Sandbox, 42);
+        assert_eq!(sandbox.level().display_name, "满配沙盒");
+        assert_eq!(sandbox.unlocked_slots, 6);
+        assert!(matches!(sandbox.slots[3], Some(SlotItem::Chime { .. })));
+        assert!(sandbox.set_sandbox_companion(false));
+        assert!(sandbox.snapshot().hellhound.is_none());
+        assert!(sandbox.set_sandbox_companion(true));
+        assert!(sandbox.snapshot().hellhound.is_some());
+        for slot in 0..sandbox.unlocked_slots {
+            assert!(sandbox.equip_plant(slot, FruitKind::BowlingPumpkin));
+        }
+        assert!(sandbox.slots.iter().all(|slot| matches!(
+            slot,
+            Some(SlotItem::Fruit(Fruit {
+                kind: FruitKind::BowlingPumpkin,
+                ..
+            }))
+        )));
+        assert!(sandbox.equip_chime(3));
+    }
+
+    #[test]
+    fn wild_hellhound_spawns_in_final_wave_and_tames_into_victory() {
+        let mut orchard = Orchard::new(LevelId::T1, 7);
+        for _ in 0..2 {
+            orchard.end_wave();
+            assert!(orchard.next_wave());
+        }
+        for _ in 0..1300 {
+            orchard.step();
+        }
+        let config = orchard.level().tame_fight.unwrap();
+        let dog = orchard.snapshot().hellhound.unwrap();
+        assert!(matches!(dog.state, HellhoundState::Wild { remaining, max }
+            if remaining == config.resolve && max == config.resolve));
+        assert!(dog.pos.x < SPAWN_X);
+        let hit = |orchard: &mut Orchard, kind: FruitKind| {
+            let dog = orchard.hellhound.unwrap();
+            let mut body = body_at(orchard, kind, Stage::Giant, dog.pos, Point::new(0., 220.));
+            orchard.move_body(&mut body);
+        };
+        hit(&mut orchard, FruitKind::RedApple);
+        assert!(
+            matches!(orchard.hellhound.unwrap().state, HellhoundState::Wild { remaining, .. }
+            if remaining == config.resolve - 4 - config.apple_bonus)
+        );
+        for _ in 0..2 {
+            hit(&mut orchard, FruitKind::RedApple);
+        }
+        orchard.step();
+        assert_eq!(orchard.phase, Phase::Victory);
+        assert!(matches!(
+            orchard.hellhound.unwrap().state,
+            HellhoundState::Tamed
+        ));
+        assert!(orchard
+            .events
+            .iter()
+            .any(|event| matches!(event, VfxEvent::Tamed(_))));
+        assert!(!orchard
+            .events
+            .iter()
+            .any(|event| matches!(event, VfxEvent::MonsterDie(_))));
+        assert!(orchard.next_level());
+        assert_eq!(orchard.level().id, LevelId::T2);
+        assert!(matches!(
+            orchard.hellhound.unwrap().state,
+            HellhoundState::Patrolling
+        ));
+    }
+
+    #[test]
+    fn companion_patrols_charges_and_restarts_parked_pumpkins() {
+        let mut orchard = Orchard::new(LevelId::T2, 0);
+        let config = orchard.level().companion.unwrap();
+        let start = orchard.hellhound.unwrap().pos.x;
+        for _ in 0..1450 {
+            orchard.update_companion();
+            assert!((start..=config.patrol_end).contains(&orchard.hellhound.unwrap().pos.x));
+        }
+        let x = orchard.hellhound.unwrap().pos.x + 29.;
+        orchard.spawn(MonsterKind::GreenSlime, x);
+        for _ in 0..30 {
+            orchard.update_companion();
+        }
+        assert_eq!(
+            orchard.monsters[0].hp,
+            MonsterKind::GreenSlime.hp() - config.damage
+        );
+        assert_eq!(orchard.monsters[0].knockback, config.knockback);
+        assert_eq!(orchard.stats.hellhound.damage, u32::from(config.damage));
+        orchard.monsters.clear();
+        let x = orchard.hellhound.unwrap().pos.x;
+        let kind = FruitKind::BowlingPumpkin;
+        let body = body_at(
+            &mut orchard,
+            kind,
+            Stage::Mature,
+            Point::new(x, ground(x) - 8.),
+            Point::default(),
+        );
+        let id = body.id;
+        orchard.barricades.push(Barricade {
+            body,
+            age: 0,
+            hits_left: 2,
+        });
+        for _ in 0..config.cooldown_ticks + 1200 {
+            orchard.update_companion();
+            if orchard.barricades.is_empty() {
+                break;
+            }
+        }
+        let restarted = orchard.bodies.iter().find(|body| body.id == id).unwrap();
+        assert!(restarted.rolling && restarted.velocity.x > 100.);
+    }
+
+    #[test]
+    fn three_boars_trigger_twelve_second_nap_and_a_ripe_apple_revives() {
+        let mut orchard = Orchard::new(LevelId::T2, 0);
+        for expected_stamina in [2, 1, 0] {
+            let x = orchard.hellhound.unwrap().pos.x;
+            orchard.spawn(MonsterKind::IronBoar, x + 10.);
+            orchard.update_companion();
+            orchard.update_companion();
+            assert_eq!(orchard.hellhound.unwrap().stamina, expected_stamina);
+            orchard.monsters.clear();
+        }
+        assert!(matches!(
+            orchard.hellhound.unwrap().state,
+            HellhoundState::Dizzy { ticks_left: 1439 }
+        ));
+        assert!(orchard
+            .events
+            .iter()
+            .any(|event| matches!(event, VfxEvent::HellhoundDizzy(_))));
+        let pos = orchard.hellhound.unwrap().pos;
+        let mut apple = body_at(
+            &mut orchard,
+            FruitKind::RedApple,
+            Stage::Small,
+            pos,
+            Point::new(0., 40.),
+        );
+        orchard.move_body(&mut apple);
+        assert_eq!(orchard.hellhound.unwrap().stamina, 0);
+        let mut apple = body_at(
+            &mut orchard,
+            FruitKind::RedApple,
+            Stage::Mature,
+            pos,
+            Point::new(0., 40.),
+        );
+        assert!(!orchard.move_body(&mut apple));
+        assert_eq!(orchard.hellhound.unwrap().stamina, 3);
+        assert!(matches!(
+            orchard.hellhound.unwrap().state,
+            HellhoundState::Patrolling
+        ));
+        assert!(matches!(
+            orchard.events.back(),
+            Some(VfxEvent::HellhoundRevived(_))
+        ));
     }
 
     fn body_at(
@@ -1189,12 +1951,14 @@ mod tests {
 
     #[test]
     fn unlocks_reject_locked_placements_and_tray_holds_multiple_items() {
-        let mut orchard = Orchard::default();
-        assert_eq!(orchard.unlocked_slots, 2);
-        assert!(orchard.slots[2..].iter().all(Option::is_none));
-        orchard.end_wave();
+        let mut orchard = Orchard::new(LevelId::T2, 0);
         assert_eq!(orchard.unlocked_slots, 3);
+        assert!(orchard.slots[3..].iter().all(Option::is_none));
         assert!(!orchard.swap_plants(0, 3));
+        orchard.end_wave();
+        assert_eq!(orchard.unlocked_slots, 4);
+        assert_eq!(stage_at(&orchard, 3), Stage::Small);
+        assert!(!orchard.swap_plants(0, 4));
         assert!(orchard.swap_plants(0, 6));
         assert!(orchard.swap_plants(2, 7));
         assert_eq!(orchard.reserve.len(), 2);
@@ -1203,26 +1967,8 @@ mod tests {
         assert!(orchard.swap_plants(6, 2));
         assert!(orchard.reserve.is_empty());
         assert!(orchard.next_wave());
-        orchard.end_wave();
-        assert_eq!(orchard.unlocked_slots, 5);
-        assert!(matches!(
-            orchard.slots[3],
-            Some(SlotItem::Chime { cooldown: 0 })
-        ));
-        assert!(orchard.next_wave());
-        orchard.end_wave();
-        assert_eq!(orchard.unlocked_slots, 6);
-        assert_eq!(
-            orchard.slots.iter().flatten().count() + orchard.reserve.len(),
-            7
-        );
-        assert!(matches!(
-            orchard.reserve[0],
-            SlotItem::Fruit(Fruit {
-                kind: FruitKind::BounceMelon,
-                ..
-            })
-        ));
+        assert_eq!(orchard.wave, 2);
+        assert!(!orchard.swap_plants(0, 1));
     }
 
     #[test]
@@ -1233,6 +1979,7 @@ mod tests {
         }
         assert!(orchard.cut_fruit(0));
         assert!(!orchard.cut_fruit_angled(1, f32::NAN));
+        orchard.vines[1] = VineSway::default();
         assert!(orchard.cut_fruit_angled(1, -500.));
         assert_eq!(orchard.bodies[0].velocity.x, 0.);
         let velocity = orchard.bodies[1].velocity;
@@ -1255,14 +2002,20 @@ mod tests {
             assert!(!orchard.move_body(&mut body));
             assert_eq!(body.bounces, 0);
             assert!(!body.rolling);
+            assert!(
+                matches!(orchard.events.back(), Some(VfxEvent::GreenSplat(_, crop)) if *crop == kind)
+            );
             orchard.spawn(MonsterKind::GreenSlime, 180.);
             assert!(!orchard.move_body(&mut body));
             assert_eq!(orchard.monsters[0].hp, 2);
+            assert!(
+                matches!(orchard.events.back(), Some(VfxEvent::GreenSplat(_, crop)) if *crop == kind)
+            );
         }
     }
 
     #[test]
-    fn vertically_dropped_melons_decay_to_two_rebounds_across_the_trellis() {
+    fn floor_rebounds_retain_78_percent_then_shatter() {
         for (slot, x) in SLOTS.into_iter().enumerate() {
             for stage in [Stage::Mature, Stage::Giant] {
                 let mut orchard = Orchard {
@@ -1275,24 +2028,25 @@ mod tests {
                 let mut body = orchard.bodies.pop().unwrap();
                 let floor = ground(x) - body.radius();
                 let mut apex = [floor; 2];
-                for _ in 0..360 {
+                for _ in 0..900 {
                     let before = body.bounces;
-                    let impact = body.velocity.y + GRAVITY * DT;
+                    let impact = body.velocity.y + MELON_GRAVITY * DT;
                     if !orchard.move_body(&mut body) {
                         assert!(impact * MELON_RESTITUTION < MELON_MIN_REBOUND);
                         break;
                     }
                     if body.bounces > before {
-                        assert!((body.velocity.y + impact * 0.64).abs() < 0.001);
+                        assert!((body.velocity.y + impact * MELON_RESTITUTION).abs() < 0.001);
+                        assert_eq!(body.combo_bounces, body.bounces);
                     }
-                    if body.bounces != 0 {
+                    if (1..=2).contains(&body.bounces) {
                         let height = &mut apex[(body.bounces - 1) as usize];
                         *height = height.min(body.pos.y);
                     }
                 }
                 assert!(floor - apex[0] > 30.);
-                assert!((0.33..0.46).contains(&((floor - apex[1]) / (floor - apex[0]))));
-                assert_eq!(body.bounces, 2);
+                assert!(apex[1] > apex[0]);
+                assert!(body.bounces >= 2);
                 assert!(matches!(
                     orchard.events.back(),
                     Some(VfxEvent::FruitShatter(..))
@@ -1323,7 +2077,7 @@ mod tests {
         assert_eq!(melon.bounces, 1);
         assert_eq!(orchard.monsters[0].hp, MonsterKind::Shield.hp());
         orchard.monsters.clear();
-        for _ in 0..700 {
+        for _ in 0..1800 {
             if !orchard.move_body(&mut melon) {
                 break;
             }
@@ -1349,27 +2103,25 @@ mod tests {
         orchard.spawn(MonsterKind::IronBoar, 219.);
         orchard.step();
         assert!(orchard.bodies.is_empty());
-        assert_eq!(orchard.barricades[0].hits_left, 3);
-        assert_eq!(orchard.monsters[0].hp, 4);
+        assert_eq!(orchard.barricades[0].hits_left, 2);
+        assert_eq!(orchard.monsters[0].hp, 6);
         orchard
     }
 
     #[test]
-    fn parked_pumpkin_blocks_and_breaks_on_third_bite() {
+    fn parked_pumpkin_blocks_and_breaks_on_second_bite() {
         let mut orchard = park_pumpkin();
         orchard.tick = 5000;
-        orchard.spawned = 8;
+        orchard.spawned[0] = orchard.level.waves[0].spawns[0].count;
         let edge = orchard.barricades[0].body.pos.x + orchard.barricades[0].body.radius() + 10.;
-        for remaining in [2, 1] {
-            for _ in 0..300 {
-                orchard.step();
-                if orchard.barricades[0].hits_left == remaining {
-                    break;
-                }
+        for _ in 0..300 {
+            orchard.step();
+            if orchard.barricades[0].hits_left == 1 {
+                break;
             }
-            assert_eq!(orchard.barricades[0].hits_left, remaining);
-            assert_eq!(orchard.monsters[0].pos.x, edge);
         }
+        assert_eq!(orchard.barricades[0].hits_left, 1);
+        assert_eq!(orchard.monsters[0].pos.x, edge);
         for _ in 0..84 {
             orchard.step();
         }
@@ -1381,7 +2133,7 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e, VfxEvent::BarricadeBite(_)))
                 .count(),
-            3
+            2
         );
     }
 
@@ -1397,7 +2149,7 @@ mod tests {
             let survived = orchard.move_body(&mut hitter);
             if kind == FruitKind::BounceMelon {
                 assert!(survived && hitter.velocity.y < 0.);
-                assert_eq!(orchard.barricades[0].hits_left, 3);
+                assert_eq!(orchard.barricades[0].hits_left, 2);
             } else {
                 assert!(!survived);
                 assert!(orchard.barricades.is_empty());
@@ -1413,7 +2165,7 @@ mod tests {
         let mut orchard = park_pumpkin();
         orchard.monsters.clear();
         orchard.tick = 200;
-        orchard.spawned = 8;
+        orchard.spawned[0] = orchard.level.waves[0].spawns[0].count;
         let x = orchard.barricades[0].body.pos.x;
         for _ in 0..599 {
             orchard.update_barricades();
@@ -1482,7 +2234,7 @@ mod tests {
 
     #[test]
     fn protagonist_bonks_small_fruit_and_digests_only_giant_apples_for_fifteen_seconds() {
-        let mut orchard = Orchard::default();
+        let mut orchard = isolated_sandbox();
         orchard.protagonist.hp = 3;
         for stage in [Stage::Small, Stage::Mature] {
             set_fruit(&mut orchard, 0, FruitKind::RedApple, stage);
@@ -1517,7 +2269,6 @@ mod tests {
         }
         assert_eq!(orchard.protagonist.hp, 4);
         assert_eq!(orchard.protagonist.digestion_cooldown, 1800);
-        orchard.spawned = 100;
         for _ in 0..1799 {
             orchard.step();
         }
@@ -1536,7 +2287,7 @@ mod tests {
 
     #[test]
     fn flash_step_snaps_to_nearest_valid_fruit_and_recharges_after_seven_seconds() {
-        let mut orchard = Orchard::default();
+        let mut orchard = isolated_sandbox();
         let cursor = Point::new(200., 80.);
         for (stage, x, vy) in [
             (Stage::Mature, 248., 25.),
@@ -1569,7 +2320,6 @@ mod tests {
         }
         orchard.step();
         assert_eq!(orchard.protagonist.hp, 4);
-        orchard.spawned = 100;
         for _ in (HOME_RUN_IFRAMES + 1)..839 {
             orchard.step();
         }
@@ -1646,7 +2396,10 @@ mod tests {
         }
         assert_eq!(orchard.monsters[0].hp, 5);
         assert!(orchard.monsters[0].knockback > 80.);
-        assert_eq!(melon.velocity.y, -HOME_RUN_MELON_IMPACT * 0.64);
+        assert_eq!(
+            melon.velocity.y,
+            -HOME_RUN_MELON_IMPACT * MELON_MONSTER_RESTITUTION
+        );
         orchard.monsters.clear();
         for _ in 0..700 {
             if !orchard.move_body(&mut melon) {
@@ -1696,10 +2449,10 @@ mod tests {
                 orchard.spawn(kind, pumpkin.pos.x + offset);
                 let next = (pumpkin.velocity.x + acceleration).min(pumpkin.roll_speed_cap());
                 assert!(orchard.move_body(&mut pumpkin));
-                let retention = if kind == MonsterKind::GreenSlime {
-                    light
-                } else {
-                    heavy
+                let retention = match kind {
+                    MonsterKind::GreenSlime => light,
+                    MonsterKind::Shield => 0.08,
+                    _ => heavy,
                 };
                 assert!(
                     (pumpkin.velocity.x - next * retention).abs() < 0.001,

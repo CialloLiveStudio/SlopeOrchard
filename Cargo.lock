@@ -3,19 +3,6 @@
 version = 4
 
 [[package]]
-name = "slope-orchard-core"
-version = "0.1.0"
-
-[[package]]
-name = "slope-orchard-extension"
-version = "0.1.0"
-dependencies = [
- "slope-orchard-core",
- "godot",
- "serde_json",
-]
-
-[[package]]
 name = "gdextension-api"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -198,6 +185,19 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "slope-orchard-core"
+version = "0.1.0"
+
+[[package]]
+name = "slope-orchard-extension"
+version = "0.1.0"
+dependencies = [
+ "godot",
+ "serde_json",
+ "slope-orchard-core",
 ]
 
 [[package]]

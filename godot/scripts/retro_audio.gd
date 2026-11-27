@@ -14,14 +14,16 @@ var voice := 0
 func _ready() -> void:
 	sounds = {
 		"cut": _sample(0.075, 1200.0, 240.0, 0.8),
+		"green_cut": _sample(0.041, 2100.0, 520.0, 0.36),
 		"hit": _sample(0.11, 192.0, 64.0, 0.42),
-		"bounce": _sample(0.19, 155.0, 615.0, 0.02),
+		"bounce": _sample(0.085, 510.0, 790.0, 0.06),
 		"ring": _sample(0.34, 1174.0, 1172.0, 0.0),
 		"bowl": _sample(0.29, 105.0, 48.0, 0.61),
 		"heal": _sample(0.26, 480.0, 1120.0, 0.0),
 		"bonk": _sample(0.15, 650.0, 210.0, 0.05),
 		"home_run": _sample(0.095, 850.0, 125.0, 0.57),
 		"shield": _sample(0.23, 230.0, 810.0, 0.06),
+		"charge": _sample(0.10, 170.0, 100.0, 0.25),
 	}
 	for i in 8:
 		var player := AudioStreamPlayer.new()
@@ -29,12 +31,16 @@ func _ready() -> void:
 		add_child(player)
 		players.append(player)
 
-func play(key: String) -> void:
+func play_combo(bounces: int) -> void:
+	play("bounce", pow(2.0, 2.0 * clampi(bounces - 1, 0, 8) / 12.0))
+
+func play(key: String, pitch := 1.0) -> void:
 	if muted:
 		return
 	var player := players[voice]
 	voice = (voice + 1) % players.size()
 	player.stream = sounds[key]
+	player.pitch_scale = pitch
 	player.play()
 
 func _sample(duration: float, first: float, last: float, grain: float) -> AudioStreamWAV:

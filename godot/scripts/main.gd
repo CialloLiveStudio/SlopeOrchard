@@ -21,11 +21,11 @@ const VICTORY := 2
 const DEFEAT := 3
 const SANDBOX := 4
 const DASH_VFX_TIME := 0.23
+const COMBO_HITSTOP := 0.020
 
 var bridge: RefCounted
 var model: Dictionary
 var slot_x: Array
-var hook_y: float
 var background: Texture2D
 var clouds: Array[ImageTexture] = []
 var fruit_textures: Array[ImageTexture] = []
@@ -33,6 +33,7 @@ var green_fruits: Array[ImageTexture] = []
 var fruit_flashes: Array[ImageTexture] = []
 var monsters: Array[ImageTexture] = []
 var monster_flashes: Array[ImageTexture] = []
+var hound_frames := {}
 var bell: ImageTexture
 var chief: ImageTexture
 var chief_flash: ImageTexture
@@ -44,7 +45,8 @@ var wave_label: Label
 var hint: Label
 var next_button: Button
 var mute_button: Button
-var sandbox_button: Button
+var companion_button: Button
+var level_buttons := {}
 var elapsed := 0.0
 var hitstop := 0.0
 var shake := 0.0
@@ -55,7 +57,6 @@ var trail_angled := false
 var swiping := false
 var swipe_moved := false
 var press_at := Vector2.ZERO
-var visited := {}
 var dragged_item := -1
 var drag_button := 0
 var drag_item: Dictionary = {}
@@ -63,12 +64,13 @@ var flashes := {}
 var effects: Array[Dictionary] = []
 var dash: Dictionary = {}
 var current_phase := -1
+var hound_charge_until := 0.0
+var chief_bonk_until := 0.0
 
 func _ready() -> void:
 	bridge = ClassDB.instantiate("OrchardBridge")
 	var layout: Dictionary = JSON.parse_string(bridge.snapshot())
 	slot_x = layout.slot_x
-	hook_y = layout.trellis_y
 	background = Art.scenery(slot_x)
 	for cloud in CLOUDS:
 		clouds.append(Art.cloud(cloud.z))
@@ -83,6 +85,8 @@ func _ready() -> void:
 		Art.sprite(Art.SHIELD, Art.SHIELD_PALETTE)])
 	monster_flashes.assign([Art.sprite(Art.SLIME, slime_colors, true), Art.sprite(Art.BOAR, boar_colors, true),
 		Art.sprite(Art.SHIELD, Art.SHIELD_PALETTE, true)])
+	for pose in ["patrol", "charge", "tamed", "nap"]:
+		hound_frames[pose] = [Art.hellhound(pose, 0), Art.hellhound(pose, 1)]
 	bell = Art.sprite(Art.BELL, {"O": "#624238", "G": "#ffd86c", "P": "#f2af53", "D": "#ca7e43", "H": "#fff1ac"})
 	chief = Art.sprite(Art.CHIEF, Art.CHIEF_PALETTE)
 	chief_flash = Art.sprite(Art.CHIEF, Art.CHIEF_PALETTE, true)
@@ -103,11 +107,14 @@ func _build_hud() -> void:
 	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud.draw.connect(_paint_hud)
 	add_child(hud)
-	wave_label = _label(Vector2(12, 4), 12, "")
+	wave_label = _label(Vector2(87, 5), 11, "")
 	hint = _label(Vector2(12, 246), 11, "")
-	sandbox_button = _button(Vector2(284, 3), Vector2(69, 20), "满配沙盒", func(): _restart(true))
-	_button(Vector2(358, 3), Vector2(54, 20), "重开", func(): _restart(false))
-	mute_button = _button(Vector2(417, 3), Vector2(54, 20), "静音", _toggle_mute)
+	level_buttons["t1"] = _button(Vector2(153, 3), Vector2(76, 20), "T1 初遇黑狼", func(): _restart("t1"))
+	level_buttons["t2"] = _button(Vector2(233, 3), Vector2(76, 20), "T2 节奏压测", func(): _restart("t2"))
+	level_buttons["sandbox"] = _button(Vector2(313, 3), Vector2(60, 20), "满配沙盒", func(): _restart("sandbox"))
+	_button(Vector2(377, 3), Vector2(42, 20), "重开", func(): _restart())
+	mute_button = _button(Vector2(423, 3), Vector2(48, 20), "静音", _toggle_mute)
+	companion_button = _button(Vector2(383, 234), Vector2(88, 25), "黑狼出战: 开", _toggle_companion)
 	next_button = _button(Vector2(393, 234), Vector2(76, 25), "下一波", _continue_run, true)
 
 func _label(at: Vector2, size: int, words: String) -> Label:
@@ -128,7 +135,7 @@ func _button(at: Vector2, extent: Vector2, words: String, action: Callable, acce
 	button.focus_mode = Control.FOCUS_NONE
 	button.add_theme_font_override("font", FONT)
 	button.add_theme_font_size_override("font_size", 11)
-	for state in ["normal", "hover", "pressed"]:
+	for state in ["normal", "hover", "pressed", "hover_pressed"]:
 		var style := StyleBoxFlat.new()
 		style.set_border_width_all(1)
 		style.border_color = Color("#d89a5d") if accent else Color("#627b8a")
@@ -148,13 +155,24 @@ func _toggle_mute() -> void:
 	audio.muted = not audio.muted
 	mute_button.text = "开声音" if audio.muted else "静音"
 
-func _restart(sandbox: bool) -> void:
-	if sandbox:
-		bridge.start_sandbox()
-	else:
+func _toggle_companion() -> void:
+	if bridge.set_sandbox_companion(not model.hellhound.sandbox_enabled):
+		hound_charge_until = 0
+		_refresh_model()
+
+func _restart(level_id := "") -> void:
+	if level_id.is_empty():
 		bridge.reset_run()
+	else:
+		bridge.start_level(level_id)
+	_reset_presentation()
+
+func _reset_presentation() -> void:
 	hitstop = 0
 	shake = 0
+	hound_charge_until = 0
+	chief_bonk_until = 0
+	world.position = Vector2.ZERO
 	effects.clear()
 	dash.clear()
 	flashes.clear()
@@ -170,18 +188,30 @@ func _continue_run() -> void:
 		bridge.next_wave()
 		_stop_drag()
 		_refresh_model()
+	elif model.phase == VICTORY and bridge.next_level():
+		_reset_presentation()
 	else:
-		_restart(false)
+		_restart()
 
 func _refresh_model() -> void:
 	model = JSON.parse_string(bridge.snapshot())
 	var phase := int(model.phase)
 	model.phase = phase
-	wave_label.text = "沙盒" if phase == SANDBOX else ("第 %d/4 波" % model.wave)
+	wave_label.text = "沙盒" if phase == SANDBOX else ("第 %d/%d 波" % [model.wave, model.wave_count])
+	for id in level_buttons:
+		var button: Button = level_buttons[id]
+		button.toggle_mode = true
+		button.set_pressed_no_signal(model.level_id == id)
+	companion_button.visible = phase == SANDBOX
+	if phase == SANDBOX:
+		companion_button.text = "黑狼出战: 开" if model.hellhound.sandbox_enabled else "黑狼出战: 关"
 	if current_phase != phase:
 		current_phase = phase
 		next_button.visible = phase in [INTERMISSION, VICTORY, DEFEAT]
-		next_button.text = "下一波" if phase == INTERMISSION else "再来一局"
+		match phase:
+			INTERMISSION: next_button.text = "下一波"
+			VICTORY: next_button.text = "下一关"
+			_: next_button.text = "再来一局"
 		match phase:
 			INTERMISSION:
 				hint.text = "拖动果苗或风铃换位"
@@ -218,8 +248,17 @@ func _process(delta: float) -> void:
 	_drain_events()
 
 func _drain_events() -> void:
-	for event in JSON.parse_string(bridge.drain_events()):
-		_effect(event)
+	var events: Array = JSON.parse_string(bridge.take_events())
+	for i in events.size():
+		var combo_hit := false
+		if events[i][0] == "hit":
+			# Core emits hit, optional die, then bounce and combo.
+			var next := i + 1
+			if next < events.size() and events[next][0] == "die":
+				next += 1
+			combo_hit = next + 1 < events.size() and events[next][0] == "bounce" \
+				and events[next + 1][0] == "combo_bounces" and events[next + 1][3]
+		_effect(events[i], combo_hit)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT]:
@@ -237,14 +276,16 @@ func _unhandled_input(event: InputEvent) -> void:
 				swiping = true
 				swipe_moved = false
 				press_at = mouse
-				visited.clear()
 				trail.clear()
 		else:
 			if event.button_index == drag_button:
 				_finish_drag()
 			if swiping and event.button_index == MOUSE_BUTTON_LEFT:
 				if not swipe_moved:
-					_cut_along(press_at, mouse, 0.0)
+					var target := mouse - world.position
+					bridge.click_cut(target.x, target.y)
+					_refresh_model()
+					_drain_events()
 				swiping = false
 	if event is InputEventMouseMotion and swiping:
 		var from: Vector2 = event.position - event.relative if swipe_moved else press_at
@@ -262,11 +303,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			trail.pop_front()
 		trail_angled = absf(vx) >= 1.0
 		trail_life = 0.09
-		_cut_along(from, event.position, vx if trail_angled else 0.0)
+		bridge.slash_cut(from - world.position, event.position - world.position, vx if trail_angled else 0.0)
+		_refresh_model()
+		_drain_events()
 
 func _slot_near(point: Vector2, distance: float) -> int:
 	for i in slot_x.size():
-		if point.distance_to(Vector2(slot_x[i], hook_y)) <= distance:
+		if (point - world.position).distance_to(_fruit_center(i)) <= distance:
 			return i
 	return -1
 
@@ -316,26 +359,24 @@ func _stop_drag() -> void:
 	drag_item = {}
 
 func _fruit_center(index: int) -> Vector2:
-	return Vector2(slot_x[index] + sin(elapsed * 2.6 + index * 1.2) * 1.5, hook_y)
+	return _vec(model.slot_geometry[index].fruit_center)
 
-func _cut_along(from: Vector2, to: Vector2, vx: float) -> void:
+func _focused_fruit() -> int:
+	var closest := -1
+	var distance := INF
 	for i in int(model.unlocked_slots):
-		var fruit = model.slots[i]
-		if fruit == null or fruit.type != "fruit" or not fruit.hanging or visited.has(i):
-			continue
-		var center := _fruit_center(i) - Vector2(0, 3)
-		var closest := Geometry2D.get_closest_point_to_segment(center, from, to) if from != to else to
-		if center.distance_to(closest) <= maxf(7.0, 9.0 * fruit.scale):
-			var cut: bool = bridge.cut_fruit(i) if is_zero_approx(vx) else bridge.cut_fruit_angled(i, vx)
-			if cut:
-				visited[i] = true
-	_refresh_model()
+		var radius = model.slot_geometry[i].cut_radius
+		var offset := (mouse - world.position).distance_to(_fruit_center(i))
+		if radius != null and offset <= radius and offset < distance:
+			closest = i
+			distance = offset
+	return closest
 
 func _paint_hud() -> void:
 	hud.draw_rect(Rect2(0, 0, 480, 26), INK)
 	hud.draw_rect(Rect2(0, 26, 480, 2), Color("#466179"))
 	for i in 5:
-		hud.draw_texture(hearts[0 if i < model.protagonist.hp else 1], Vector2(81 + 14 * i, 7))
+		hud.draw_texture(hearts[0 if i < model.protagonist.hp else 1], Vector2(12 + 14 * i, 7))
 	if current_phase in [INTERMISSION, VICTORY, DEFEAT]:
 		hud.draw_rect(Rect2(0, 227, 480, 43), INK)
 		hud.draw_rect(Rect2(0, 227, 480, 2), GOLD)
@@ -414,11 +455,12 @@ func _paint_world() -> void:
 		_paint_juice(zone)
 	_paint_protagonist()
 	var active: bool = model.phase in [WAVE, SANDBOX]
-	var focus := _slot_near(mouse, 14.0)
-	if active and focus >= 0 and model.slots[focus] != null and model.slots[focus].get("hanging", false):
-		var x: float = slot_x[focus]
+	var focus := _focused_fruit() if active and dragged_item < 0 else -1
+	if focus >= 0:
+		var center := _fruit_center(focus)
+		var x := roundf(center.x)
 		var floor_y := roundi(_ground(x))
-		for y in range(77, floor_y, 6):
+		for y in range(roundi(center.y) + 9, floor_y, 6):
 			world.draw_rect(Rect2(x, y, 1, mini(3, floor_y - y)), Color("#ffffff88"))
 		world.draw_rect(Rect2(x - 4, floor_y, 9, 1), Color("#fff8caaa"))
 	for i in slot_x.size():
@@ -431,15 +473,24 @@ func _paint_world() -> void:
 			world.draw_rect(Rect2(x - 9, 62, 19, 2), Color("#677989"))
 			continue
 		if dragged_item >= 0:
-			world.draw_rect(Rect2(x - 10, hook_y - 8, 21, 20), Color("#fff0a9c8"), false)
+			world.draw_rect(Rect2(_fruit_center(i).round() - Vector2(10, 8), Vector2(21, 20)), Color("#fff0a9c8"), false)
 		if item == null:
 			world.draw_rect(Rect2(x - 1, 59, 3, 3), Color("#446252"))
 		elif dragged_item != i:
 			var center := _fruit_center(i)
 			if item.type == "fruit":
-				world.draw_line(Vector2(x, 57), center.round(), Color("#438844"), 1)
-				world.draw_rect(Rect2(x - 2, 58, 3, 2), Color("#93ba55"))
-			_stamp_item(item, center, i)
+				var geometry: Dictionary = model.slot_geometry[i]
+				var hook := _vec(geometry.hook)
+				var angle := -float(geometry.sway_angle)
+				world.draw_set_transform(hook, angle)
+				world.draw_line(Vector2.ZERO, Vector2(0, hook.distance_to(center)), Color("#316b46"), 2)
+				world.draw_rect(Rect2(-3, 6, 3, 2), Color("#93ba55"))
+				world.draw_rect(Rect2(1, 11, 3, 2), Color("#6da650"))
+				world.draw_set_transform(center.round(), angle)
+				_stamp_item(item, Vector2.ZERO, i)
+				world.draw_set_transform(Vector2.ZERO)
+			else:
+				_stamp_item(item, center, i)
 	for barrier in model.barricades:
 		_paint_barricade(barrier)
 	for body in model.bodies:
@@ -461,6 +512,8 @@ func _paint_world() -> void:
 		else:
 			_stamp(texture, pos, scaling)
 	for enemy in model.monsters:
+		if enemy.kind == 3:
+			continue # The wild enemy is drawn from the hellhound snapshot.
 		var pos := _vec(enemy.pos)
 		var struck: bool = flashes.has(enemy.id)
 		var squash := Vector2.ONE
@@ -474,18 +527,26 @@ func _paint_world() -> void:
 		var bar := (pos + Vector2(-width / 2.0, -10 if enemy.kind == 0 else -14)).round()
 		world.draw_rect(Rect2(bar, Vector2(width, 3)), INK)
 		world.draw_rect(Rect2(bar + Vector2.ONE, Vector2(ceili((width - 2) * enemy.hp / enemy.max_hp), 1)), Color("#ed7958"))
+	if model.hellhound.present:
+		_paint_hellhound(model.hellhound)
 	if dragged_item >= 0:
-		_stamp_item(drag_item, mouse, -1)
+		_stamp_item(drag_item, mouse - world.position, -1)
 	if trail.size() > 1:
 		var tint := SLASH if trail_angled else PAPER
 		tint.a = clampf(trail_life * 15, 0.0, 1.0)
 		for i in range(1, trail.size()):
 			if trail[i - 1].distance_to(trail[i]) > 0.2:
-				world.draw_line(trail[i - 1].round(), trail[i].round(), tint, 1.0 if i < trail.size() - 2 else 2.0)
+				world.draw_line((trail[i - 1] - world.position).round(), (trail[i] - world.position).round(),
+					tint, 1.0 if i < trail.size() - 2 else 2.0)
 	for effect in effects:
 		var age: float = effect.until - elapsed
 		var pos: Vector2 = effect.pos
-		if effect.has("text"):
+		if effect.has("hearts"):
+			var time := 1.0 - age / float(effect.hearts)
+			for i in 3:
+				var rise := Vector2((i - 1) * (6 + 10 * time), -8 - 29 * time + (i % 2) * 6)
+				_stamp(hearts[0], pos + rise, Vector2.ONE * 0.65, Color(1, 1, 1, clampf(age * 4, 0, 1)))
+		elif effect.has("text"):
 			var at := (pos + Vector2(-3, -25 + age * 26)).round()
 			var color: Color = effect.get("color", GOLD if effect.giant else PAPER)
 			color.a = clampf(age * 5, 0.0, 1.0)
@@ -515,6 +576,59 @@ func _paint_world() -> void:
 func _vec(pair: Array) -> Vector2:
 	return Vector2(pair[0], pair[1])
 
+func _paint_hellhound(dog: Dictionary) -> void:
+	var pos := _vec(dog.pos)
+	var pose: String = dog.state
+	if pose == "wild":
+		pose = "patrol"
+	elif pose == "patrol" and elapsed < hound_charge_until:
+		pose = "charge"
+	var direction := 1.0 if dog.facing_right else -1.0
+	var frame := floori(elapsed * (22 if pose == "charge" else 9)) % 2
+	var center := (pos + Vector2(0, 2)).round()
+	if pose == "charge":
+		center.x += direction * 3
+		for i in 3:
+			var streak := center + Vector2(-direction * (16 + i * 3), i * 3)
+			world.draw_line(streak, streak - Vector2(direction * 7, 0), PAPER)
+	world.draw_set_transform(center, 0.0, Vector2(direction, 1.0))
+	_stamp(hound_frames[pose][frame], Vector2.ZERO)
+	world.draw_set_transform(Vector2.ZERO)
+	if dog.mode == "wild":
+		var bar := Vector2(clampf(pos.x - 17, 1, 445), pos.y - 12).round()
+		world.draw_rect(Rect2(bar, Vector2(34, 15)), INK)
+		world.draw_string(FONT, bar + Vector2(7, 9), "驯服", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, PAPER)
+		world.draw_rect(Rect2(bar + Vector2(2, 11), Vector2(30, 2)), Color("#aa544c"))
+		world.draw_rect(Rect2(bar + Vector2(2, 11),
+			Vector2(roundf(30.0 * dog.tame_progress / dog.wild_max_hp), 2)), GOLD)
+	elif pose == "tamed":
+		var words := "小黑加入果园！"
+		var width := FONT.get_string_size(words, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+		var x := roundf((480 - width) / 2)
+		world.draw_rect(Rect2(x - 12, 103, width + 24, 26), INK)
+		world.draw_rect(Rect2(x - 12, 103, width + 24, 1), GOLD)
+		world.draw_string(FONT, Vector2(x, 121), words, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, PAPER)
+		_stamp(hearts[0], pos + Vector2(0, -14 + sin(elapsed * 7) * 2), Vector2.ONE * 0.65)
+	else:
+		var pips := (pos + Vector2(-8, -9)).round()
+		for i in int(dog.max_stamina):
+			var at := pips + Vector2(i * 6, 0)
+			world.draw_rect(Rect2(at, Vector2(5, 4)), INK)
+			world.draw_rect(Rect2(at + Vector2.ONE, Vector2(3, 2)),
+				GOLD if i < dog.stamina else Color("#5b6179"))
+		if pose == "nap":
+			_orbit_stars(pos - Vector2(0, 14), 10.0)
+			world.draw_string(FONT, pos.round() + Vector2(-13, -22), "%.1fs" % dog.nap_seconds_left,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 9, INK)
+
+func _orbit_stars(center: Vector2, radius: float) -> void:
+	for i in 3:
+		var angle := elapsed * 10.0 + TAU * i / 3.0
+		var at := (center + Vector2(cos(angle) * radius, sin(angle) * 3.0)).round()
+		world.draw_rect(Rect2(at - Vector2(0, 2), Vector2(1, 5)), GOLD)
+		world.draw_rect(Rect2(at - Vector2(2, 0), Vector2(5, 1)), GOLD)
+		world.draw_rect(Rect2(at, Vector2.ONE), PAPER)
+
 func _dash_progress(age: float) -> float:
 	return clampf(minf(age / 0.035, (DASH_VFX_TIME - age) / 0.09), 0.0, 1.0)
 
@@ -538,6 +652,8 @@ func _paint_protagonist() -> void:
 				_paint_swing_fan(finish + Vector2(4, 0), 1.0 - (age - 0.035) / 0.115)
 	var flashing := int(model.protagonist.hit_flash) % 8 >= 3
 	_stamp(chief_flash if flashing else chief, hero)
+	if elapsed < chief_bonk_until:
+		_orbit_stars(hero - Vector2(0, 11), 11.0)
 	var grip := hero + Vector2(4, 3)
 	var tool := (grip + Vector2.from_angle(tool_angle) * 12).round()
 	world.draw_line(grip.round(), tool, Color("#805042"), 2)
@@ -567,23 +683,28 @@ func _paint_swing_fan(at: Vector2, opacity: float) -> void:
 	world.draw_colored_polygon(vertices, Color(1.0, 1.0, 1.0, opacity * 0.72))
 	world.draw_polyline(vertices.slice(1), Color(1.0, 1.0, 1.0, opacity), 2.0)
 
-func _effect(event: Array) -> void:
+func _effect(event: Array, combo_hit := false) -> void:
 	var pos := _vec(event[1])
 	match event[0]:
-		"cut":
-			_debris(pos, FRUIT_COLORS[int(event[2])], 5)
+		"cut", "green_cut":
+			var green_cut: bool = event[0] == "green_cut"
+			_debris(pos, GREEN if green_cut else FRUIT_COLORS[int(event[2])], 5)
 			var angled := not is_zero_approx(float(event[3]))
 			effects.append({"pos": pos, "until": elapsed + 0.15,
 				"slash": Vector2(float(event[3]) / 90.0, 1).normalized() * 18.0,
-				"color": SLASH if angled else PAPER})
-			audio.play("cut")
+				"color": GREEN if green_cut else (SLASH if angled else PAPER)})
+			audio.play(event[0])
 		"shatter":
-			_debris(pos, GREEN if event[3] == 0 else FRUIT_COLORS[int(event[2])], 10)
+			_debris(pos, FRUIT_COLORS[int(event[2])], 10)
+		"green_splat":
+			_debris(pos, Color("#86cf37"), 12)
+			_debris(pos, Color("#e0ff90"), 6)
 		"hit":
 			for enemy in model.monsters:
 				if _vec(enemy.pos).distance_to(pos) < 6.0:
 					flashes[enemy.id] = elapsed + 0.095
-			hitstop = maxf(hitstop, 0.036 if event[3] else 0.028)
+			if not combo_hit:
+				hitstop = maxf(hitstop, 0.036 if event[3] else 0.028)
 			shake = maxf(shake, 2.6 if event[3] else 1.5)
 			effects.append({"pos": pos, "until": elapsed + 0.56, "text": str(int(event[2])), "giant": event[3]})
 			_debris(pos, GOLD if event[3] else Color("#fff6d7"), 8)
@@ -593,7 +714,10 @@ func _effect(event: Array) -> void:
 		"bounce":
 			effects.append({"pos": pos, "until": elapsed + 0.24, "color": Color("#f4ffae")})
 			_debris(pos, Color("#c4e584"), 8)
-			audio.play("bounce")
+		"combo_bounces":
+			audio.play_combo(int(event[2]))
+			if event[3]:
+				hitstop = maxf(hitstop, COMBO_HITSTOP)
 		"knock":
 			_debris(pos, Color("#c1ec8b"), 7)
 		"ring":
@@ -622,8 +746,7 @@ func _effect(event: Array) -> void:
 			_debris(hero - Vector2(0, 8), GREEN, 12)
 			audio.play("heal")
 		"bonk":
-			effects.append({"pos": _vec(model.protagonist.pos), "until": elapsed + 0.38,
-				"text": "*", "giant": true})
+			chief_bonk_until = elapsed + 0.65
 			_debris(_vec(model.protagonist.pos) - Vector2(0, 6), Color("#c6f1ff"), 8)
 			audio.play("bonk")
 		"home_run":
@@ -636,6 +759,28 @@ func _effect(event: Array) -> void:
 			effects.append({"pos": pos, "until": elapsed + 0.24, "color": Color("#fff1ba")})
 			_debris(pos, GOLD, 10)
 			audio.play("shield")
+		"tame_progress":
+			_debris(pos, GOLD, 8)
+			audio.play("hit")
+		"tamed", "hellhound_revived":
+			var duration := 0.95 if event[0] == "tamed" else 0.65
+			effects.append({"pos": pos, "until": elapsed + duration, "hearts": duration})
+			_debris(pos - Vector2(0, 8), GOLD, 10)
+			_debris(pos - Vector2(0, 8), PAPER, 6)
+			audio.play("heal")
+		"hellhound_charge":
+			hound_charge_until = elapsed + 0.12
+			_debris(pos + Vector2(0, 8), Color("#b78c68"), 6)
+			audio.play("charge")
+		"hellhound_hit":
+			hound_charge_until = elapsed + 0.12
+			effects.append({"pos": pos, "until": elapsed + 0.42, "text": str(int(event[2])),
+				"giant": false, "color": GOLD})
+			_debris(pos, GOLD, 7)
+			audio.play("hit")
+		"hellhound_nap":
+			hound_charge_until = 0.0
+			audio.play("bonk")
 
 func _debris(at: Vector2, color: Color, count: int) -> void:
 	var particles := CPUParticles2D.new()

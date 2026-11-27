@@ -1,10 +1,12 @@
-extends SceneTree
+﻿extends SceneTree
 
 const SCENE = preload("res://scenes/main.tscn")
 const STEP := 1.0 / 120.0
 var failures := 0
 
 func _initialize() -> void:
+	# Fail if a runtime error interrupts the probe before it can quit.
+	create_timer(30.0).timeout.connect(func(): quit(1))
 	call_deferred("_run")
 
 func _check(condition: bool, message: String) -> void:
@@ -15,90 +17,11 @@ func _check(condition: bool, message: String) -> void:
 func _state(bridge: RefCounted) -> Dictionary:
 	return JSON.parse_string(bridge.snapshot())
 
-func _run() -> void:
-	var game := SCENE.instantiate()
-	root.add_child(game)
-	await process_frame
-	game.set_process(false)
-	game.audio.muted = true
-	_check(game.model.phase == 0 and game.model.protagonist.hp == 5, "Main scene did not initialize")
-	_check(game.background.get_size() == Vector2(480, 270), "Pixel background has the wrong dimensions")
-	_check_inputs(game)
-	for character in game.hint.text:
-		_check(game.hint.get_theme_font("font").has_char(character.unicode_at(0)), "Control hint has a missing glyph")
-	game.elapsed = game.dash.get("started", game.elapsed) + 0.07
-	game.world.queue_redraw()
-	await process_frame
-	var bridge: RefCounted = game.bridge
-	_check_campaign(bridge)
-	bridge.reset_run()
-	for i in 800:
-		bridge.advance(0.1)
-		bridge.drain_events()
-		var state := _state(bridge)
-		if state.phase == 3:
-			break
-		if state.phase == 1:
-			for slot in int(state.unlocked_slots):
-				if state.slots[slot] != null:
-					_check(bridge.swap_plants(slot, state.slot_x.size() + _state(bridge).reserve.size()),
-						"Could not empty the trellis for the defeat probe")
-			_check(bridge.next_wave(), "Could not resume the undefended run")
-	var defeat := _state(bridge)
-	_check(defeat.phase == 3 and defeat.protagonist.hp == 0, "Undefended run did not reach defeat")
-	_check(defeat.protagonist.hit_flash == 24 and defeat.protagonist.pos[0] < 62, "Protagonist hit snapshot missing")
-	await _check_sandbox(game)
-	_check_shield(bridge)
-	_check_heal(game)
-	game._toggle_mute()
-	_check(not game.audio.muted, "Unmute action failed")
-	game._toggle_mute()
-	_check(game.audio.muted, "Mute action failed")
-	game.queue_free()
-	await process_frame
-	if failures == 0:
-		print("Slope Orchard v0.2.1 probe passed: campaign, defeat, sandbox, Flash-Step, digestion, input, and scene.")
-	quit(0 if failures == 0 else 1)
+func _events(bridge: RefCounted) -> Array:
+	return JSON.parse_string(bridge.take_events())
 
-func _check_campaign(bridge: RefCounted) -> void:
-	bridge.reset_run()
-	_check(not bridge.cut_fruit(-1) and not bridge.cut_fruit(5), "Invalid cuts must be rejected")
-	var unlocks := [2, 3, 5, 6]
-	var seen := {}
-	for wave in range(1, 5):
-		var initial := _state(bridge)
-		_check(initial.phase == 0 and initial.wave == wave and initial.unlocked_slots == unlocks[wave - 1],
-			"Incorrect campaign wave or slot unlocks")
-		if initial.phase != 0:
-			break
-		var events := _play_wave(bridge, seen)
-		var cleared := _state(bridge)
-		print("Wave %d ended in phase %d with %d protagonist hearts, %d hits and %d Flash-Steps." %
-			[wave, cleared.phase, cleared.protagonist.hp, events.get("hit", 0), events.get("home_run", 0)])
-		_check(events.has("hit"), "No real collision in wave %d" % wave)
-		_check(cleared.phase == (2 if wave == 4 else 1), "Wave %d did not clear" % wave)
-		if cleared.phase != 1:
-			break
-		_check(not bridge.cut_fruit(0), "Intermission must pause cutting")
-		var held: String = bridge.snapshot()
-		bridge.advance(0.25)
-		_check(held == bridge.snapshot(), "Intermission advanced the simulation")
-		match wave:
-			1:
-				_check(cleared.slots[2].kind == 1 and cleared.unlocked_slots == 3, "Missing first grant")
-				_check(not bridge.swap_plants(2, 5), "Locked slot accepted a placement")
-			2:
-				_check(cleared.unlocked_slots == 5 and cleared.slots[3].type == "chime"
-					and cleared.slots[4].kind == 2, "Missing second grant")
-				_check(bridge.swap_plants(2, 4), "Could not move the pumpkin uphill")
-			3:
-				_check(cleared.unlocked_slots == 6 and cleared.slots[5].kind == 2
-					and cleared.reserve.size() == 1 and cleared.reserve[0].kind == 1, "Missing final grants")
-				_check(bridge.swap_plants(4, 7) and _state(bridge).reserve.size() == 2, "Second tray cell failed")
-				_check(bridge.swap_plants(7, 4), "Tray-to-empty slot transfer failed")
-				_check(bridge.swap_plants(5, 3), "Could not place the second pumpkin uphill")
-		_check(bridge.next_wave(), "Next wave action failed")
-	_check(seen.get(2, 0) == 3, "Shield first appearance must be in wave 3")
+func _has_event(events: Array, key: String) -> bool:
+	return events.any(func(event): return event[0] == key)
 
 func _mouse_button(game: Node, at: Vector2, button: MouseButton, pressed: bool) -> void:
 	var event := InputEventMouseButton.new()
@@ -107,182 +30,260 @@ func _mouse_button(game: Node, at: Vector2, button: MouseButton, pressed: bool) 
 	event.pressed = pressed
 	game._unhandled_input(event)
 
-func _check_inputs(game: Node) -> void:
-	game._restart(true)
-	var slots: Array = game.model.slot_x
-	var y: float = game.model.trellis_y
-	var first := Vector2(slots[0], y)
-	_check(first.x == 122 and slots[-1] < 480, "Shifted trellis layout failed")
-	_mouse_button(game, first, MOUSE_BUTTON_LEFT, true)
-	_mouse_button(game, first, MOUSE_BUTTON_LEFT, false)
-	_check(game.model.bodies.size() == 1 and not game.model.slots[0].hanging
-		and game.model.bodies[0].velocity[0] == 0.0, "Mouse click failed to drop vertically")
-	var from := Vector2(slots[1], y - 2)
+func _drag(game: Node, from: Vector2, to: Vector2, button: MouseButton) -> void:
+	_mouse_button(game, from, button, true)
+	_mouse_button(game, to, button, false)
+
+func _run() -> void:
+	var game := SCENE.instantiate()
+	root.add_child(game)
+	await process_frame
+	game.set_process(false)
+	game.audio.muted = true
+	_check(game.background.get_size() == Vector2(480, 270), "Pixel background has the wrong dimensions")
+	_check(game.model.level_id == "t1" and game.model.phase == 0, "Scene must start in T1")
+	if game.model.get("level_id") != "t1":
+		quit(1)
+		return
+	for button in game.level_buttons.values():
+		for character in button.text:
+			_check(game.FONT.has_char(character.unicode_at(0)), "Level button has a missing glyph")
+	await _check_green_input(game)
+	await _check_t1(game)
+	await _check_t2(game)
+	await _check_sandbox(game)
+	game._toggle_mute()
+	_check(not game.audio.muted, "Unmute action failed")
+	game._toggle_mute()
+	_check(game.audio.muted, "Mute action failed")
+	game.queue_free()
+	await process_frame
+	if failures == 0:
+		print("Slope Orchard v0.3 probe passed: T1 taming, T2 companion, sandbox toggle and swaps, green cuts, sway, and scene.")
+	quit(0 if failures == 0 else 1)
+
+func _check_green_input(game: Node) -> void:
+	var bridge: RefCounted = game.bridge
+	_check(not bridge.start_level("unknown"), "Unknown level accepted")
+	_check(not bridge.cut_fruit(-1) and not bridge.cut_fruit(5), "Invalid cuts accepted")
+	bridge.advance(0.25)
+	bridge.advance(0.25)
+	bridge.advance(11 * STEP)
+	_check(not bridge.cut_fruit(0), "Fruit was cut before the green threshold")
+	bridge.advance(STEP)
+	game._refresh_model()
+	var first: Vector2 = game._fruit_center(0)
+	var slot: Dictionary = game.model.slots[0]
+	_check(slot.stage == 0 and slot.hanging and slot.growth >= 0.15, "T1 apple did not hang at green threshold")
+	_check(game.model.slot_geometry[0].cut_radius >= 22.0, "Green hitbox is smaller than 22 px")
+	var outside := first + Vector2(0, 22.5)
+	_check(not bridge.click_cut(outside.x, outside.y), "Green cut accepted outside its radius")
+	var at := first + Vector2(0, 21)
+	_drag(game, at, at, MOUSE_BUTTON_LEFT)
+	_check(game.model.bodies.size() == 1 and not game.model.slots[0].hanging, "Green mouse click at 21 px missed")
+	if game.model.bodies.size() != 1:
+		return
+	_check(game._vec(game.model.bodies[0].pos).is_equal_approx(first), "Drop began away from the drawn fruit")
+	_check(game.effects.size() == 1, "Green click did not dispatch cut effects")
+	_check(absf(game.model.slot_geometry[1].sway_angular_vel) > 0.01, "Green cut did not impart a neighbor impulse")
+	bridge.advance(0.25)
+	game._refresh_model()
+	var geometry: Dictionary = game.model.slot_geometry[1]
+	var center: Vector2 = game._fruit_center(1)
+	var hook: Vector2 = game._vec(geometry.hook)
+	var angle: float = geometry.sway_angle
+	_check(absf(rad_to_deg(angle)) >= 8.0 and absf(rad_to_deg(angle)) <= 18.01, "Neighbor cut did not visibly swing the vine")
+	_check(center.distance_to(hook + Vector2.DOWN.rotated(-angle) * 18.0) < 0.005,
+		"Sway geometry disagrees with core pendulum")
+	game.mouse = center + Vector2(0, 21)
+	_check(game._focused_fruit() == 1, "Drop guide did not focus the swayed green fruit")
+	await process_frame
+	var from := center + Vector2(-24, 21)
 	_mouse_button(game, from, MOUSE_BUTTON_LEFT, true)
 	var motion := InputEventMouseMotion.new()
-	motion.position = Vector2(slots[2] + 5, y - 2)
+	motion.position = center + Vector2(24, 21)
 	motion.relative = motion.position - from
 	motion.velocity = Vector2(900, 0)
 	game._unhandled_input(motion)
 	_mouse_button(game, motion.position, MOUSE_BUTTON_LEFT, false)
-	_check(game.model.bodies.size() == 3 and game.trail_angled, "Swipe failed to cut two stems")
-	for body in game.model.bodies.slice(1):
-		var angle := rad_to_deg(atan2(body.velocity[0], body.velocity[1]))
-		_check(angle > 17.9 and angle <= 18.01, "Swipe velocity was not aimed and capped")
-	var target := first + Vector2(0, 48)
-	_mouse_button(game, target + Vector2.DOWN, MOUSE_BUTTON_RIGHT, true)
-	_check(game.model.protagonist.home_run_cooldown == 0, "Flash-Step snapped outside 48 pixels")
-	_mouse_button(game, target, MOUSE_BUTTON_RIGHT, true)
-	_mouse_button(game, target, MOUSE_BUTTON_RIGHT, false)
-	_check(game.model.protagonist.home_run_cooldown == 840 and game.model.protagonist.invulnerability_ticks > 0
-		and game.model.bodies[0].home_run and game.hitstop == 0.05 and game.dash.target == first,
-		"Right click failed to Flash-Step, set cooldown, or play dash VFX")
-	_mouse_button(game, Vector2(slots[3], y), MOUSE_BUTTON_RIGHT, true)
-	_mouse_button(game, Vector2(slots[4], y), MOUSE_BUTTON_RIGHT, false)
-	_check(game.model.slots[4].type == "chime", "Mouse drag failed to move the chime")
-	_mouse_button(game, Vector2(slots[4], y), MOUSE_BUTTON_RIGHT, true)
-	_mouse_button(game, Vector2(244, 245), MOUSE_BUTTON_RIGHT, false)
-	_check(game.model.reserve.size() == 2 and game.model.reserve[1].type == "chime", "Mouse drag failed to store chime")
-
-func _check_sandbox(game: Node) -> void:
-	game._restart(true)
-	var bridge: RefCounted = game.bridge
-	var state := _state(bridge)
-	_check(state.phase == 4 and state.unlocked_slots == 6 and state.slots[3].type == "chime",
-		"Sandbox loadout failed")
-	_check(state.monsters.map(func(enemy): return int(enemy.kind)) == [0, 1, 2]
-		and state.monsters[2].hp == 6, "Sandbox must start with all three monsters")
-	_check(bridge.swap_plants(1, 2) and bridge.cut_fruit(2) and bridge.cut_fruit(0) and bridge.cut_fruit(5),
-		"Sandbox opening cuts failed")
-	var seen := {}
-	var checked_barricade := false
-	for tick in 2000:
-		bridge.advance(STEP)
-		state = _state(bridge)
-		if state.protagonist.home_run_cooldown > 0:
-			seen["home_run_cooldown"] = true
-		if state.slots[3].cooldown > 0:
-			_check(state.slots[3].cooldown <= 120, "Chime cooldown exceeds one second")
-			seen["cooldown"] = true
-		if state.bodies.any(func(body): return body.home_run and body.velocity[0] > 300):
-			seen["projectile"] = true
-		for barrier in state.barricades:
-			if not checked_barricade:
-				_check(barrier.body.kind == 2 and not barrier.body.rolling and int(barrier.hits_left) in [1, 2, 3],
-					"Invalid parked pumpkin snapshot")
-				checked_barricade = true
-		if tick > 0 and tick % 90 == 0:
-			_sandbox_cuts(bridge, state)
-		if not seen.has("home_run") and tick >= 58:
-			for body in state.bodies:
-				if body.kind == 1 and bridge.trigger_home_run(body.pos[0], body.pos[1]):
-					break
-		for event in JSON.parse_string(bridge.drain_events()):
-			if not seen.has(event[0]):
-				game.model = state
-				game._effect(event)
-			seen[event[0]] = true
-		if tick % 600 == 0:
-			game._refresh_model()
-			await process_frame
-	print("Sandbox interactions: %s. Barricade %s." % [str(seen.keys()), checked_barricade])
-	for key in ["bounce", "ring", "cooldown", "bowl", "home_run", "home_run_cooldown", "projectile"]:
-		_check(seen.has(key), "Sandbox interaction missing: " + key)
-	_check(checked_barricade, "Sandbox never exposed a parked pumpkin")
-	_check(state.phase == 4, "Sandbox stopped")
-	game._refresh_model()
-	await process_frame
-
-func _check_shield(bridge: RefCounted) -> void:
-	bridge.start_sandbox()
-	for i in 110:
-		bridge.advance(STEP)
-	_check(bridge.cut_fruit(5), "Could not drop a pumpkin over the approaching shield")
-	for i in 85:
-		bridge.advance(STEP)
-	var events: Array = JSON.parse_string(bridge.drain_events())
-	_check(events.any(func(event): return event[0] == "shield"), "Shield cap did not rebound the pumpkin")
-
-func _check_heal(game: Node) -> void:
-	game._restart(true)
-	var bridge: RefCounted = game.bridge
-	_check(bridge.swap_plants(0, 7), "Could not hold a giant apple in reserve")
-	for i in 160:
-		bridge.advance(0.1)
-		if _state(bridge).protagonist.hp == 4:
-			break
-	_check(_state(bridge).protagonist.hp == 4, "Sandbox protagonist did not take damage")
-	bridge.drain_events()
-	_check(bridge.swap_plants(7, 0) and bridge.cut_fruit_angled(0, -29.2), "Could not swipe the reserve apple left")
-	for i in 64:
-		bridge.advance(STEP)
-	var healed := _state(bridge)
-	var events: Array = JSON.parse_string(bridge.drain_events())
-	_check(healed.protagonist.hp == 5 and healed.protagonist.digestion_cooldown > 1700
-		and events.any(func(event): return event[0] == "heal"),
-		"Protagonist did not catch the apple and heal")
-	game._refresh_model()
+	_check(game.model.bodies.size() == 2 and game.model.bodies.back().stage == 0 and game.trail_angled,
+		"Green slash at 21 px missed")
+	for i in 4:
+		bridge.advance(0.25)
+	var events := _events(bridge)
+	_check(_has_event(events, "green_splat"), "Green apple did not emit green_splat")
 	for event in events:
 		game._effect(event)
+	await process_frame
+	game._restart("t1")
+	for i in 3:
+		bridge.advance(0.25)
+	_check(bridge.cut_fruit_angled(0, -29.2), "Could not slash a green apple toward the protagonist")
+	for i in 3:
+		bridge.advance(0.25)
+	game._refresh_model()
+	game._drain_events()
+	_check(game.chief_bonk_until > game.elapsed and game.model.protagonist.hp == 5,
+		"Green bonk did not show stars or altered the protagonist's health")
+	await process_frame
 
-func _sandbox_cuts(bridge: RefCounted, state: Dictionary) -> void:
-	for slot in [0, 2, 4, 5]:
-		var fruit: Dictionary = state.slots[slot]
-		if fruit.stage != 2 and not (slot == 5 and fruit.stage == 1):
-			continue
-		var x: float = state.slot_x[slot]
-		if state.barricades.any(func(barrier): return absf(barrier.body.pos[0] - x) < 22):
-			continue
-		if slot in [0, 5] or state.monsters.any(func(enemy): return absf(enemy.pos[0] - x - 18.0) < 40):
-			bridge.cut_fruit(slot)
-
-func _play_wave(bridge: RefCounted, seen: Dictionary) -> Dictionary:
-	var events := {}
-	var recent := {}
-	for frame in 3600:
+func _check_t1(game: Node) -> void:
+	game.level_buttons.t1.pressed.emit()
+	var bridge: RefCounted = game.bridge
+	_check(game.model.level_id == "t1" and game.model.wave_count == 3 and not game.model.hellhound.present,
+		"T1 start snapshot is incorrect")
+	_check(not bridge.set_sandbox_companion(true), "Companion toggle was accepted in T1")
+	var wild_seen := false
+	var tame_seen := false
+	for frame in 4000:
 		var state := _state(bridge)
+		if state.phase == 1:
+			game._refresh_model()
+			var first: Vector2 = game._fruit_center(0)
+			var second: Vector2 = game._fruit_center(1)
+			var tray: Vector2 = game.RESERVE
+			_drag(game, first, tray, MOUSE_BUTTON_LEFT)
+			_drag(game, second, tray + Vector2(game.RESERVE_STEP, 0), MOUSE_BUTTON_LEFT)
+			_check(game.model.reserve.size() == 2 and game.model.reserve.all(func(item): return item.kind == 0),
+				"Intermission tray rejected duplicate apples")
+			_drag(game, tray + Vector2(game.RESERVE_STEP, 0), first, MOUSE_BUTTON_LEFT)
+			_drag(game, tray, second, MOUSE_BUTTON_LEFT)
+			_check(game.model.reserve.is_empty() and game.model.slots[0] != null and game.model.slots[1] != null,
+				"Intermission did not restore both apples")
+			game.next_button.pressed.emit()
+			continue
 		if state.phase != 0:
 			break
+		if state.hellhound.present and not wild_seen:
+			wild_seen = true
+			_check(state.wave == 3 and state.hellhound.mode == "wild" and state.hellhound.state == "wild"
+				and state.hellhound.wild_hp == state.hellhound.wild_max_hp
+				and state.hellhound.tame_progress == 0, "Wild hellhound snapshot is incorrect")
+			game._refresh_model()
+			await process_frame
+		_t1_cuts(bridge, state)
+		bridge.advance(4 * STEP)
+		var events := _events(bridge)
+		if _has_event(events, "tame_progress"):
+			tame_seen = true
+			game._refresh_model()
+			for event in events:
+				game._effect(event)
+			await process_frame
+	game._refresh_model()
+	_check(wild_seen and tame_seen, "T1 did not exercise wild hellhound taming")
+	_check(game.model.phase == 2 and game.model.hellhound.get("state") == "tamed"
+		and game.model.hellhound.tame_progress == game.model.hellhound.wild_max_hp
+		and game.model.companion_unlocked, "T1 did not reach the tamed celebration")
+	await process_frame
+	game.next_button.pressed.emit()
+	_check(game.model.level_id == "t2", "T1 victory did not continue to T2")
+
+func _t1_cuts(bridge: RefCounted, state: Dictionary) -> void:
+	for i in int(state.unlocked_slots):
+		var fruit = state.slots[i]
+		if fruit == null or fruit.stage == 0:
+			continue
+		var geometry: Dictionary = state.slot_geometry[i]
+		var center: Array = geometry.fruit_center
+		var tangent: float = geometry.sway_angular_vel * 18.0 * cos(geometry.sway_angle)
 		for enemy in state.monsters:
-			if not seen.has(int(enemy.kind)):
-				seen[int(enemy.kind)] = state.wave
-		for i in int(state.unlocked_slots):
-			var fruit = state.slots[i]
-			if fruit == null or fruit.type != "fruit" or not fruit.hanging or fruit.stage == 0:
-				continue
-			var x: float = state.slot_x[i]
-			if i == 0 and fruit.stage == 2 and state.protagonist.hp < 5 and state.protagonist.digestion_cooldown == 0:
-				bridge.cut_fruit_angled(i, -29.2)
-				continue
-			if fruit.kind == 2:
-				if state.monsters.any(func(enemy): return enemy.pos[0] > x + 3):
-					bridge.cut_fruit(i)
-				continue
-			for enemy in state.monsters:
-				var speed: float = [29.0, 20.0, 24.0][int(enemy.kind)]
-				var fall := sqrt(2.0 * maxf(0.0, enemy.pos[1] - 68.0 - fruit.scale * 7.0) / 610.0)
-				var predicted_x: float = enemy.pos[0] - speed * fall
-				var damage: int = [1, 2, 6 if enemy.kind == 1 else 4][int(fruit.stage)] if fruit.kind == 0 else int(fruit.stage)
-				if frame < recent.get(enemy.id, 0):
-					continue
-				if enemy.kind == 2:
-					if absf(predicted_x - x - 17.0) < 2.5 and bridge.cut_fruit_angled(i, 29.2):
-						recent[enemy.id] = frame + 22
-						break
-				elif absf(predicted_x - x) < 3.5 and (damage >= enemy.hp or i <= 1 or fruit.kind == 1):
-					if bridge.cut_fruit(i):
-						recent[enemy.id] = frame + 24
-						break
-		if state.protagonist.home_run_cooldown == 0:
-			for body in state.bodies:
-				if body.rolling or body.stage == 0 or body.home_run:
-					continue
-				var distance_to_lane: float = maxf(0, 155 + 0.194 * (body.pos[0] - 70) - body.pos[1] - 12)
-				var ahead: float = distance_to_lane * 440.0 / 310.0
-				if state.monsters.any(func(enemy): return enemy.pos[0] > body.pos[0] + ahead + 16):
-					if bridge.trigger_home_run(body.pos[0], body.pos[1]):
-						break
-		bridge.advance(1.0 / 30.0)
-		for event in JSON.parse_string(bridge.drain_events()):
-			events[event[0]] = events.get(event[0], 0) + 1
-	return events
+			var speed := 43.0 if enemy.kind == 3 else 29.0
+			var fall := sqrt(2.0 * maxf(0.0, enemy.pos[1] - center[1] - 6.0) / 610.0)
+			var relative_x: float = enemy.pos[0] - center[0] - (speed + tangent) * fall
+			if absf(relative_x) <= 4.5:
+				bridge.cut_fruit(i)
+				break
+
+func _check_t2(game: Node) -> void:
+	game.level_buttons.t2.pressed.emit()
+	var bridge: RefCounted = game.bridge
+	var dog: Dictionary = game.model.hellhound
+	_check(game.model.level_id == "t2" and game.model.unlocked_slots == 3 and dog.present
+		and dog.mode == "companion" and dog.state == "patrol" and dog.stamina == 3
+		and dog.max_stamina == 3 and is_equal_approx(dog.nap_seconds_total, 12.0),
+		"T2 companion or starting loadout missing")
+	_check(bridge.equip_plant(0, 1), "T2 rejected a second melon")
+	game._refresh_model()
+	_check(game.model.slots[0].kind == 1 and game.model.slots[1].kind == 1, "Duplicate equip replaced an existing melon")
+	bridge.advance(0.25)
+	game._refresh_model()
+	_check(game.model.hellhound.pos[0] > dog.pos[0], "Companion did not patrol")
+	await process_frame
+	game._restart()
+	_check(game.model.level_id == "t2" and game.model.slots[0].kind == 0, "Reset did not restart the current level")
+
+func _check_sandbox(game: Node) -> void:
+	game.level_buttons.sandbox.pressed.emit()
+	var bridge: RefCounted = game.bridge
+	_check(game.model.level_id == "sandbox" and game.model.phase == 4 and game.model.unlocked_slots == 6
+		and game.model.monsters.size() == 3 and game.model.slots[3].type == "chime",
+		"Sandbox starting snapshot is incorrect")
+	_check(game.companion_button.visible and game.model.hellhound.sandbox_enabled, "Sandbox toggle missing")
+	game.companion_button.pressed.emit()
+	_check(not game.model.hellhound.present and not game.model.hellhound.sandbox_enabled, "Sandbox toggle did not remove companion")
+	game.companion_button.pressed.emit()
+	_check(game.model.hellhound.present and game.model.hellhound.stamina == 3, "Sandbox toggle did not restore companion")
+	var tray: Vector2 = game.RESERVE
+	_drag(game, game._fruit_center(4), tray + Vector2(game.RESERVE_STEP, 0), MOUSE_BUTTON_RIGHT)
+	_drag(game, game._fruit_center(5), tray + Vector2(game.RESERVE_STEP * 2, 0), MOUSE_BUTTON_RIGHT)
+	_check(game.model.reserve.size() == 3 and game.model.reserve[1].kind == 0 and game.model.reserve[2].kind == 2,
+		"Sandbox drag could not store fruit in new tray cells")
+	_drag(game, tray + Vector2(game.RESERVE_STEP, 0), game._fruit_center(4), MOUSE_BUTTON_RIGHT)
+	_check(game.model.slots[0].kind == 0 and game.model.slots[4].kind == 0,
+		"Sandbox drag could not place a second apple")
+	_check(bridge.swap_plants(4, 8), "Could not hold a giant apple in the tray")
+	_check(bridge.cut_fruit(1), "Could not drop sandbox melon")
+	game._refresh_model()
+	if game.model.bodies.is_empty():
+		return
+	var target: Vector2 = game._vec(game.model.bodies[0].pos)
+	_mouse_button(game, target, MOUSE_BUTTON_RIGHT, true)
+	_check(game.model.bodies[0].home_run and is_equal_approx(game.hitstop, 0.05), "Flash-Step input or hitstop failed")
+	var seen := {}
+	for i in 750:
+		bridge.advance(6 * STEP)
+		var events := _events(bridge)
+		for event in events:
+			if not seen.has(event[0]):
+				game._refresh_model()
+				game._effect(event)
+				await process_frame
+			seen[event[0]] = true
+		if seen.has("hellhound_nap"):
+			break
+	for key in ["bounce", "combo_bounces", "hellhound_charge", "hellhound_hit", "hellhound_nap"]:
+		_check(seen.has(key), "Sandbox did not emit " + key)
+	game._refresh_model()
+	_check(game.model.hellhound.state == "nap" and game.model.hellhound.stamina == 0
+		and game.model.hellhound.nap_seconds_left >= 11.95, "Nap state does not expose the 12-second countdown")
+	await process_frame
+	_check_revive(game)
+	await process_frame
+	game.hitstop = 0.0
+	game._effect(["combo_bounces", [234, 148], 3, true])
+	_check(is_equal_approx(game.hitstop, 0.020), "Melon combo did not trigger 20 ms hitstop")
+
+func _check_revive(game: Node) -> void:
+	var bridge: RefCounted = game.bridge
+	var dog: Vector2 = game._vec(game.model.hellhound.pos)
+	var closest := 0
+	for slot in range(1, 3):
+		if absf(game._fruit_center(slot).x - dog.x) < absf(game._fruit_center(closest).x - dog.x):
+			closest = slot
+	var center: Vector2 = game._fruit_center(closest)
+	var gap := dog.x - center.x
+	var vx := clampf(gap * 3.0, -29.2, 29.2) if absf(gap) > 7.0 else 0.0
+	_check(bridge.swap_plants(8, closest) and bridge.cut_fruit_angled(closest, vx), "Could not feed the reserved apple")
+	for i in 30:
+		bridge.advance(4 * STEP)
+		var events := _events(bridge)
+		if _has_event(events, "hellhound_revived"):
+			game._refresh_model()
+			for event in events:
+				game._effect(event)
+			_check(game.model.hellhound.stamina == 3 and game.model.hellhound.state == "patrol"
+				and game.effects.any(func(effect): return effect.has("hearts")),
+				"Apple revive did not refill stamina and play hearts")
+			return
+	_check(false, "Reserved ripe apple missed the napping companion at %s" % dog)

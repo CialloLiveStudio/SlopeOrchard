@@ -85,14 +85,69 @@ const HEART := [
 	"ORRRRRRRRRO.", ".ORRRRRRRO..", "..ORRRRRO...", "...ORRRO....",
 	"....ORO.....", ".....O......",
 ]
+const HELLHOUND := [
+	"..............O..O...", ".............OBOOBO..",
+	"............OBPBBBO..", "......OOOOOOOBHHBBO..",
+	"...OOOBBBBBBBBHBYBO..", "..OBBBHHBBBBBBDBBBOO.",
+	"..OBBBBBBBBBBDDBBBDBO", "..OBDDDDDDDBDDDOOOOO.",
+	"...OOOOOOOOOOOO......",
+]
+const HELLHOUND_SIT := [
+	"............O..O.....", "...........OBOOBO....",
+	"..........OBPBBBO....", "..........OBHHBBO....",
+	".........OBHBYBOO....", ".......OOBBDBBBDBO...",
+	".....OOBBBDDOOOOO....", "....OBBBBDDDO........",
+	"...OBBHBDDDOBO.......", "...OBBBDDDOBBO.......",
+	"...OOOOOOOOOOO.......",
+]
+const HELLHOUND_NAP := [
+	"..........O..O.......", "....OOOOOOBOOBO......",
+	"..OOBBBBBBBHBBO......", ".OBBHHBBBDDBDBOO.....",
+	".OBBBBBBDDDDBBDBO....", "..OOOOOOOOOOOOOO.....",
+]
+const HOUND_PALETTE := {
+	"O": "#202436", "B": "#445067", "D": "#30364c",
+	"H": "#69788c", "P": "#977987", "Y": "#ffd679",
+}
 
 static func sprite(rows: Array, colors: Dictionary, white: bool = false) -> ImageTexture:
 	var bitmap := Image.create_empty(rows[0].length(), rows.size(), false, Image.FORMAT_RGBA8)
+	_pixels(bitmap, rows, colors, Vector2i.ZERO, white)
+	return ImageTexture.create_from_image(bitmap)
+
+static func _pixels(bitmap: Image, rows: Array, colors: Dictionary, offset: Vector2i, white := false) -> void:
 	for y in rows.size():
 		for x in rows[y].length():
 			var pixel: String = rows[y][x]
 			if colors.has(pixel):
-				bitmap.set_pixel(x, y, Color.WHITE if white else Color(colors[pixel]))
+				bitmap.set_pixel(x + offset.x, y + offset.y, Color.WHITE if white else Color(colors[pixel]))
+
+static func hellhound(pose: String, frame: int = 0) -> ImageTexture:
+	var bitmap := Image.create_empty(29, 21, false, Image.FORMAT_RGBA8)
+	if pose == "nap":
+		_pixels(bitmap, HELLHOUND_NAP, HOUND_PALETTE, Vector2i(5, 13))
+	elif pose == "tamed":
+		var wag := 2 * (frame % 2)
+		box(bitmap, 2, 14 - wag, 4, 3 + wag, HOUND_PALETTE.O)
+		box(bitmap, 4, 16, 7, 3, HOUND_PALETTE.O)
+		box(bitmap, 3, 15 - wag, 2, 2 + wag, HOUND_PALETTE.B)
+		_pixels(bitmap, HELLHOUND_SIT, HOUND_PALETTE, Vector2i(5, 9))
+	else:
+		var charging := pose == "charge"
+		var y := 9 if charging else 7
+		var stride := -2 if frame % 2 == 0 else 2
+		box(bitmap, 0, y + 1, 4, 2, HOUND_PALETTE.O)
+		box(bitmap, 2, y + 2, 4, 3, HOUND_PALETTE.O)
+		box(bitmap, 4, y + 3, 7, 3, HOUND_PALETTE.O)
+		box(bitmap, 2, y + 2, 7, 1, HOUND_PALETTE.B)
+		for i in 4:
+			var leg_x := 10 + i * 2 if i < 2 else 16 + i * 2
+			var foot_x := leg_x + (stride if i % 2 == 0 else -stride)
+			var foot_y := 17 if charging or i % 2 == frame % 2 else 16
+			box(bitmap, leg_x, y + 6, 2, foot_y - y - 4, HOUND_PALETTE.O)
+			box(bitmap, mini(leg_x, foot_x), foot_y, absi(leg_x - foot_x) + 2, 2, HOUND_PALETTE.O)
+			box(bitmap, foot_x, foot_y + 1, 2, 1, HOUND_PALETTE.H if i % 2 == 0 else HOUND_PALETTE.B)
+		_pixels(bitmap, HELLHOUND, HOUND_PALETTE, Vector2i(6 if charging else 5, y))
 	return ImageTexture.create_from_image(bitmap)
 
 static func scenery(slots: Array) -> ImageTexture:
@@ -179,15 +234,15 @@ static func trellis(art: Image, slots: Array) -> void:
 	var left := int(slots.front()) - 29
 	var right := int(slots.back()) + 22
 	for x in [left + 7, right]:
-		box(art, x, 48, 5, 16, "#5a3c34")
-		box(art, x + 1, 49, 2, 14, "#c99159")
+		box(art, x, 34, 5, 16, "#5a3c34")
+		box(art, x + 1, 35, 2, 14, "#c99159")
 	var width := right - left + 12
-	box(art, left, 50, width, 7, "#5a3c34")
-	box(art, left + 1, 51, width - 2, 2, "#e6ad6a")
-	box(art, left + 2, 53, width - 3, 2, "#b77a4e")
+	box(art, left, 36, width, 7, "#5a3c34")
+	box(art, left + 1, 37, width - 2, 2, "#e6ad6a")
+	box(art, left + 2, 39, width - 3, 2, "#b77a4e")
 	for slot in slots:
 		var x := int(slot)
-		box(art, x - 2, 52, 5, 6, "#64463a")
-		box(art, x - 1, 53, 3, 3, "#f3bd72")
-		box(art, x, 57, 1, 2, "#3c6042")
+		box(art, x - 1, 41, 3, 5, "#64463a")
+		box(art, x - 2, 42, 5, 4, "#f3bd72")
+		box(art, x, 44, 1, 3, "#3c6042")
 
