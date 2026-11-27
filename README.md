@@ -1,17 +1,21 @@
 # Slope Orchard (斜坡果园)
 
-Defend the cabin through four waves. Hover to line up a drop, then click a fruit or hold the left mouse button and swipe across several. Wait for fruit to ripen for stronger hits, or cut early to catch an enemy under a hook. Overripe fruit drops on its own.
+T1, T2 and T5 start in **Prep**. Drag seeds onto hooks to choose species, move plants between hooks, or return a plant to the seed tray. T1 and T2 start with four plants and six usable hooks. Select your companions and press **开始守卫**. During battle, click fruit to drop it vertically or swipe across vines for angled cuts. The T2 reinforcement pauses combat until you plant one more seed on an empty hook.
 
-Right-click near a falling ripe fruit or a parked pumpkin to launch a Flash-Step Home Run. The bar by the doorway fills as the seven-second cooldown expires. Swipe left across the first hook to feed the protagonist a Giant Red Apple when he is hurt. Each apple restores one heart, with a 15-second digestion period between heals.
+T1 introduces the wild Hellhound. Feed it apples to recruit it. In T2 and T5, 小黑 herds monsters, kicks parked pumpkins and heads spent melons back toward the vines. Swipe a ripe apple into its mouth to start a downhill dash, or wake it from a nap. In T5, 露露西 converts puddles into fragile oil. A purple diamond marks a monster whose next fruit hit deals double damage.
 
-Between waves, drag plants between hooks and move chimes to the gaps. The final grant adds a seventh plant to the reserve, which you can swap with any of the six planted hooks. Select 下一波 to resume. In 满配沙盒, enemies keep coming and you can rearrange plants while the simulation runs. Hold Shift when dragging to keep the Home Run from triggering.
+In T5 Prep, drag a plant onto another to graft. The destination keeps its silhouette and receives the donor's trait. Hold Shift to swap occupied hooks. In the live sandbox, right-drag to graft, Shift-drag to swap, and use the seed tray and companion toggles at any time.
+
+Right-click near a falling ripe fruit or a parked pumpkin to launch a Flash-Step Home Run. The bar by the doorway fills over seven seconds. Swipe a giant apple left from the first hook to heal one heart, with a fifteen-second digestion cooldown. After defeat, **重新布阵** returns to Prep and **直接重试** restarts Battle with your current plants and companions.
 
 ## Windows
 
 Run from this directory with Rust 1.100.0 MSVC and Godot 4.7.2 installed.
 
 ```powershell
-cargo test --locked --offline
+cargo test --workspace --locked --offline
+cargo run --release --bin balance_sim
+python scripts/check_font.py
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
 ```

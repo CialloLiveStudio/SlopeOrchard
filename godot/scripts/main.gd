@@ -7,17 +7,21 @@ const CLOUDS := [
 	Vector3i(14, 70, 31), Vector3i(88, 35, 45), Vector3i(174, 79, 37),
 	Vector3i(262, 31, 42), Vector3i(346, 90, 50), Vector3i(415, 54, 48),
 ]
-const RESERVE := Vector2(223, 245)
+const RESERVE := Vector2(182, 205)
 const RESERVE_STEP := 21
 const INK := Color("#202b3e")
 const PAPER := Color("#fff4d9")
 const GOLD := Color("#ffcd72")
 const PINK := Color("#ff82b7")
-const FRUIT_COLORS := [Color("#f4504f"), Color("#a2d45d"), Color("#ffad47")]
+const FRUIT_COLORS := [Color("#f4504f"), Color("#a2d45d"), Color("#ffad47"), Color("#bc6cc9")]
 const GREEN := Color("#c6eb82")
 const SLASH := Color("#ffd27e")
 const WAVE := 0
-const INTERMISSION := 1
+const REINFORCEMENT := 1
+const PREP := 5
+const SEEDS := Vector2(44, 235)
+const SEED_STEP := 24
+const SEED_DRAG := 1000
 const VICTORY := 2
 const DEFEAT := 3
 const SANDBOX := 4
@@ -49,6 +53,11 @@ var wave_label: Label
 var hint: Label
 var next_button: Button
 var mute_button: Button
+var lulucy_sprite: ImageTexture
+var lulucy_button: Button
+var retry_button: Button
+var drag_swap := false
+var staff_until := 0.0
 var companion_button: Button
 var level_buttons := {}
 var elapsed := 0.0
@@ -95,6 +104,7 @@ func _ready() -> void:
 	for pose in ["patrol", "charge", "tamed", "nap", "pant", "munch", "dizzy", "sour"]:
 		hound_frames[pose] = [Art.hellhound(pose, 0), Art.hellhound(pose, 1)]
 	bell = Art.sprite(Art.BELL, {"O": "#624238", "G": "#ffd86c", "P": "#f2af53", "D": "#ca7e43", "H": "#fff1ac"})
+	lulucy_sprite = Art.sprite(Art.LULUCY, Art.ALCHEMIST_PALETTE)
 	chief = Art.sprite(Art.CHIEF, Art.CHIEF_PALETTE)
 	chief_flash = Art.sprite(Art.CHIEF, Art.CHIEF_PALETTE, true)
 	hearts.assign([
@@ -118,13 +128,15 @@ func _build_hud() -> void:
 	add_child(hud)
 	wave_label = _label(Vector2(87, 5), 11, "")
 	hint = _label(Vector2(12, 246), 11, "")
-	level_buttons["t1"] = _button(Vector2(153, 3), Vector2(76, 20), "T1 初遇黑狼", func(): _restart("t1"))
-	level_buttons["t2"] = _button(Vector2(233, 3), Vector2(76, 20), "T2 节奏压测", func(): _restart("t2"))
-	level_buttons["sandbox"] = _button(Vector2(313, 3), Vector2(60, 20), "满配沙盒", func(): _restart("sandbox"))
-	_button(Vector2(377, 3), Vector2(42, 20), "重开", func(): _restart())
+	for entry in [["t1", "T1"], ["t2", "T2"], ["t5", "T5"], ["sandbox", "沙盒"]]:
+		var id: String = entry[0]
+		level_buttons[id] = _button(Vector2(232 + 42 * level_buttons.size(), 3), Vector2(39, 20),
+			entry[1], func(): _restart(id))
 	mute_button = _button(Vector2(423, 3), Vector2(48, 20), "静音", _toggle_mute)
-	companion_button = _button(Vector2(383, 234), Vector2(88, 25), "黑狼出战: 开", _toggle_companion)
-	next_button = _button(Vector2(393, 234), Vector2(76, 25), "下一波", _continue_run, true)
+	companion_button = _button(Vector2(175, 226), Vector2(77, 20), "", _toggle_companion)
+	lulucy_button = _button(Vector2(256, 226), Vector2(86, 20), "", _toggle_lulucy)
+	retry_button = _button(Vector2(297, 234), Vector2(80, 24), "重新布阵", func(): _retry(false))
+	next_button = _button(Vector2(386, 226), Vector2(85, 22), "开始守卫", _continue_run, true)
 
 func _label(at: Vector2, size: int, words: String) -> Label:
 	var label := Label.new()
@@ -165,9 +177,17 @@ func _toggle_mute() -> void:
 	mute_button.text = "开声音" if audio.muted else "静音"
 
 func _toggle_companion() -> void:
-	if bridge.set_sandbox_companion(not model.hellhound.sandbox_enabled):
+	if bridge.set_hellhound(not model.hellhound.present):
 		hound_charge_until = 0
 		_refresh_model()
+
+func _toggle_lulucy() -> void:
+	if bridge.set_lulucy(not model.lulucy):
+		_refresh_model()
+
+func _retry(direct: bool) -> void:
+	if bridge.retry(direct):
+		_reset_presentation()
 
 func _restart(level_id := "") -> void:
 	if level_id.is_empty():
@@ -177,6 +197,7 @@ func _restart(level_id := "") -> void:
 	_reset_presentation()
 
 func _reset_presentation() -> void:
+	staff_until = 0
 	hitstop = 0
 	shake = 0
 	hound_charge_until = 0
@@ -194,43 +215,57 @@ func _reset_presentation() -> void:
 	_refresh_model()
 
 func _continue_run() -> void:
-	if model.phase == INTERMISSION:
-		bridge.next_wave()
-		_stop_drag()
-		_refresh_model()
-	elif model.phase == VICTORY and bridge.next_level():
-		_reset_presentation()
-	else:
-		_restart()
+	match int(model.phase):
+		PREP:
+			bridge.start_battle()
+			_stop_drag()
+			_refresh_model()
+		VICTORY:
+			if bridge.next_level():
+				_reset_presentation()
+		DEFEAT:
+			_retry(true)
 
 func _refresh_model() -> void:
 	model = JSON.parse_string(bridge.snapshot())
 	var phase := int(model.phase)
 	model.phase = phase
-	wave_label.text = "沙盒" if phase == SANDBOX else ("第 %d/%d 波" % [model.wave, model.wave_count])
+	current_phase = phase
+	wave_label.text = "满配沙盒" if phase == SANDBOX else ("%s · %s %d/%d" % [
+		str(model.level_id).to_upper(), model.level_name, model.wave, model.wave_count])
 	for id in level_buttons:
 		var button: Button = level_buttons[id]
+		button.visible = model.can_configure or phase in [VICTORY, DEFEAT]
 		button.toggle_mode = true
 		button.set_pressed_no_signal(model.level_id == id)
-	companion_button.visible = phase == SANDBOX
-	if phase == SANDBOX:
-		companion_button.text = "黑狼出战: 开" if model.hellhound.sandbox_enabled else "黑狼出战: 关"
-	if current_phase != phase:
-		current_phase = phase
-		next_button.visible = phase in [INTERMISSION, VICTORY, DEFEAT]
-		match phase:
-			INTERMISSION: next_button.text = "下一波"
-			VICTORY: next_button.text = "下一关"
-			_: next_button.text = "再来一局"
-		match phase:
-			INTERMISSION:
-				hint.text = "拖动果苗或风铃换位"
-			VICTORY:
-				hint.text = "胜利 · 果园守住了！"
-			DEFEAT:
-				hint.text = "失败 · 果园失守"
-			_:
-				hint.text = "左键切果 · 右键 Home Run"
+	companion_button.visible = model.can_configure and model.companion_slots >= 1
+	lulucy_button.visible = model.can_configure and model.companion_slots == 2
+	companion_button.text = "小黑 · " + ("上阵" if model.hellhound.present else "休息")
+	lulucy_button.text = "露露西 · " + ("上阵" if model.lulucy else "休息")
+	retry_button.visible = phase == DEFEAT
+	next_button.visible = phase in [PREP, DEFEAT] or (phase == VICTORY and model.next_level != null)
+	hint.position = Vector2(10, 249)
+	match phase:
+		PREP, SANDBOX:
+			next_button.text = "开始守卫"
+			var used: int = model.slots.filter(func(item): return item != null).size()
+			hint.text = "果架 %d/%d · 拖种子换种" % [used, model.plant_limit]
+			if phase == SANDBOX:
+				hint.text += " · 右拖嫁接 · Shift 拖换位 · 左键切果"
+			elif model.grafting:
+				hint.text += " · 拖到植株嫁接 · Shift 拖换位"
+			else:
+				hint.text += " · 拖动植株换位"
+		REINFORCEMENT:
+			hint.text = "增援到达 · 拖一枚种子到发光空位，继续守卫"
+		VICTORY:
+			next_button.text = "下一关"
+			hint.text = {"t1": "胜利 · 小黑加入果园", "t2": "胜利 · 解锁炼金果园与双伙伴", "t5": "通关 · 露露西加入果园 · 双伙伴与嫁接展示完成"}.get(model.level_id)
+		DEFEAT:
+			next_button.text = "直接重试"
+			hint.text = "果园失守"
+		_:
+			hint.text = "左键切果 · 右键 Home Run"
 	hud.queue_redraw()
 	world.queue_redraw()
 
@@ -274,7 +309,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT]:
 		mouse = event.position
 		if event.pressed:
-			if event.button_index == MOUSE_BUTTON_RIGHT and not event.shift_pressed:
+			if event.button_index == MOUSE_BUTTON_RIGHT and not event.shift_pressed and (model.phase != SANDBOX or _slot_near(mouse, 19) < 0):
 				var target := mouse - world.position
 				if bridge.trigger_home_run(target.x, target.y):
 					_refresh_model()
@@ -324,7 +359,7 @@ func _slot_near(point: Vector2, distance: float) -> int:
 	return -1
 
 func _tray_visible() -> bool:
-	return model.phase in [INTERMISSION, SANDBOX] or not model.reserve.is_empty()
+	return model.phase == SANDBOX
 
 func _tray_index(point: Vector2, allow_empty: bool) -> int:
 	if not _tray_visible() or absf(point.y - RESERVE.y) > 11.0:
@@ -335,11 +370,26 @@ func _tray_index(point: Vector2, allow_empty: bool) -> int:
 	var limit: int = model.reserve.size() + (1 if allow_empty else 0)
 	return index + slot_x.size() if index >= 0 and index < limit else -1
 
+func _seed_at(point: Vector2) -> int:
+	if absf(point.y - SEEDS.y) > 10:
+		return -1
+	var index := roundi((point.x - SEEDS.x) / SEED_STEP)
+	if index < 0 or index >= model.available_plants.size() or absf(point.x - SEEDS.x - index * SEED_STEP) > 10:
+		return -1
+	return int(model.available_plants[index])
+
 func _begin_drag(button: int, shift: bool) -> bool:
-	if model.phase not in [WAVE, INTERMISSION, SANDBOX]:
+	if not model.can_configure and model.phase != REINFORCEMENT:
 		return false
-	if model.phase != INTERMISSION and button != MOUSE_BUTTON_RIGHT and not shift:
+	var kind := _seed_at(mouse)
+	if button == MOUSE_BUTTON_LEFT and kind >= 0:
+		dragged_item = SEED_DRAG + kind
+		drag_button = button
+		drag_item = {"type":"fruit", "kind":kind, "stage":1, "scale":1.0, "graft":null, "hanging":true, "giant_age":0}
+		return true
+	if model.phase == REINFORCEMENT or (model.phase == SANDBOX and button == MOUSE_BUTTON_LEFT and not shift):
 		return false
+	drag_swap = shift or not model.grafting
 	var index := _slot_near(mouse, 19)
 	if index < 0:
 		index = _tray_index(mouse, false)
@@ -358,8 +408,16 @@ func _finish_drag() -> void:
 		var target := _slot_near(mouse, 24)
 		if target < 0:
 			target = _tray_index(mouse, dragged_item < slot_x.size())
-		if target >= 0:
-			bridge.swap_plants(dragged_item, target)
+		if _seed_at(mouse) >= 0 and dragged_item < slot_x.size():
+			bridge.remove_plant(dragged_item)
+		elif target >= 0:
+			if dragged_item >= SEED_DRAG:
+				bridge.equip_plant(target, dragged_item - SEED_DRAG)
+			elif not drag_swap and target < slot_x.size() and model.slots[target] != null \
+				and model.slots[target].type == "fruit" and drag_item.type == "fruit":
+				bridge.graft_plants(dragged_item, target)
+			else:
+				bridge.swap_plants(dragged_item, target)
 	_stop_drag()
 	_refresh_model()
 
@@ -390,14 +448,27 @@ func _paint_hud() -> void:
 	hud.draw_rect(Rect2(0, 26, 480, 2), Color("#466179"))
 	for i in 5:
 		hud.draw_texture(hearts[0 if i < model.protagonist.hp else 1], Vector2(12 + 14 * i, 7))
-	if current_phase in [INTERMISSION, VICTORY, DEFEAT]:
-		hud.draw_rect(Rect2(0, 227, 480, 43), INK)
-		hud.draw_rect(Rect2(0, 227, 480, 2), GOLD)
+	if current_phase != WAVE:
+		hud.draw_rect(Rect2(0, 221, 480, 49), INK)
+		hud.draw_rect(Rect2(0, 221, 480, 2), GOLD)
 	else:
 		hud.draw_rect(Rect2(0, 245, int(hint.get_minimum_size().x) + 24, 19), Color("#263146d9"))
+	if model.can_configure or current_phase == REINFORCEMENT:
+		hud.draw_string(FONT, Vector2(8, 240), "种子", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, GOLD)
+		for i in model.available_plants.size():
+			var at := SEEDS + Vector2(i * SEED_STEP, 0)
+			hud.draw_rect(Rect2(at - Vector2(10, 10), Vector2(21, 21)), Color("#435669"))
+			hud.draw_texture_rect(fruit_textures[int(model.available_plants[i])], Rect2(at - Vector2(9, 9), Vector2(18, 18)), false)
+	if current_phase == PREP:
+		hud.draw_rect(Rect2(4, 32, 57, 22 + 18 * model.preview.size()), INK)
+		hud.draw_string(FONT, Vector2(10, 47), "来敌", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, GOLD)
+		for i in model.preview.size():
+			var k := int(model.preview[i])
+			var icon: Texture2D = hound_frames.patrol[0] if k == 3 else monsters[k]
+			hud.draw_texture_rect(icon, Rect2(20, 50 + 18 * i, 21, 17), false)
 	if _tray_visible():
 		var size: int = model.reserve.size()
-		var empty_target := int(current_phase in [INTERMISSION, SANDBOX] and size < 7)
+		var empty_target := int(current_phase == SANDBOX and size < 7)
 		hud.draw_rect(Rect2(RESERVE.x - 42, RESERVE.y - 12, 31 + (size + empty_target) * RESERVE_STEP, 25), INK)
 		hud.draw_string(FONT, RESERVE + Vector2(-38, 4), "备用", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, GOLD)
 		for i in size + empty_target:
@@ -422,21 +493,47 @@ func _stamp_item(item: Dictionary, center: Vector2, index: int) -> void:
 		var wobble := sin(elapsed * (23.0 if cooling > 0.0 else 4.0) + index)
 		var tint := Color.WHITE.lerp(Color("#958a72"), cooling * 0.7)
 		_stamp(bell, center + Vector2(round(wobble * (1.0 + 2.0 * cooling)), 0), Vector2.ONE, tint)
-	elif item.hanging or index < 0:
+	elif item.hanging or index < 0 or model.can_configure:
 		var flash: bool = item.stage == 2 and int(item.giant_age) % 104 < 5
 		var kind := int(item.kind)
 		var texture := green_fruits[kind] if item.stage == 0 else (fruit_flashes[kind] if flash else fruit_textures[kind])
-		_stamp(texture, center, Vector2.ONE * float(item.scale))
+		if model.can_configure and index >= 0 and model.phase == PREP:
+			texture = fruit_textures[kind]
+		_stamp(texture, center, Vector2.ONE if model.phase == PREP else Vector2.ONE * float(item.scale))
+		_paint_graft(item.graft, center)
 	else:
 		world.draw_rect(Rect2(center.round() - Vector2(1, 2), Vector2(3, 3)), Color("#568e4f"))
+
+func _paint_graft(graft, at: Vector2) -> void:
+	if graft == null:
+		return
+	var color: Color = [Color("#ff5d70"), Color("#ceff75"), Color("#ffc06c"), Color("#ce7aff")][int(graft)]
+	match int(graft):
+		0:
+			for p in [Vector2(-4,0), Vector2(2,3)]:
+				world.draw_rect(Rect2(at+p-Vector2.ONE, Vector2(5,4)), INK)
+				world.draw_rect(Rect2(at+p, Vector2(3,2)), color)
+		1, 2:
+			for x in [-4, 2]:
+				var dx := 3 if int(graft) == 1 else -1
+				world.draw_line(at+Vector2(x,-3), at+Vector2(x+dx,4), INK, 3)
+				world.draw_line(at+Vector2(x,-3), at+Vector2(x+dx,4), color)
+		3:
+			world.draw_rect(Rect2(at+Vector2(-5,2), Vector2(11,2)), color)
+			for x in [-4,3]:
+				world.draw_rect(Rect2(at+Vector2(x,4), Vector2(2,4)), Color("#91f689"))
 
 func _paint_juice(zone: Dictionary) -> void:
 	var first := maxi(0, ceili(zone.left))
 	var last := mini(480, floori(zone.right))
 	var fade := clampf(float(zone.ticks_left) / 80.0, 0.0, 1.0)
+	var tint: Color = [Color("#d9de5e"), Color("#8ac954"), Color("#b673e4")][int(zone.kind)]
+	tint.a = 0.85 * fade
 	for x in range(first, last + 1):
 		var y := roundf(_ground(x))
-		world.draw_rect(Rect2(x, y - 1, 1, 4), Color(0.85, 0.87, 0.37, 0.63 * fade))
+		world.draw_rect(Rect2(x, y - 1, 1, 4), tint)
+		if zone.kind == 2 and x % 13 == 0:
+			world.draw_rect(Rect2(x, y - 2 - int(elapsed * 12 + x) % 4, 2, 2), Color("#edbfff"))
 		if x % 17 < 5:
 			world.draw_rect(Rect2(x, y, 1, 1), Color(1.0, 0.99, 0.69, 0.84 * fade))
 
@@ -444,6 +541,9 @@ func _paint_barricade(barrier: Dictionary) -> void:
 	var at := _vec(barrier.body.pos)
 	var tint := Color("#837358") if barrier.rotting else Color.WHITE
 	_stamp(fruit_textures[2], at, Vector2.ONE * float(barrier.body.scale), tint)
+	_paint_graft(barrier.body.graft, at)
+	if barrier.body.stage == 2:
+		world.draw_polyline(PackedVector2Array([at+Vector2(-3,-5), at+Vector2(1,-1), at+Vector2(-1,1), at+Vector2(3,6)]), INK, 2)
 	for i in int(barrier.hits_left):
 		world.draw_rect(Rect2(roundf(at.x) - 5 + i * 4, roundf(at.y) - 11, 3, 1), GOLD)
 	if barrier.rotting:
@@ -466,6 +566,12 @@ func _paint_world() -> void:
 	world.draw_texture(background, Vector2.ZERO)
 	for zone in model.juice_zones:
 		_paint_juice(zone)
+	if model.lulucy:
+		var porch := Vector2(37, 137)
+		_stamp(lulucy_sprite, porch)
+		var wand := porch + (Vector2(15,-11) if elapsed < staff_until else Vector2(10,-8))
+		world.draw_line(porch+Vector2(6,1), wand, GOLD, 2)
+		world.draw_rect(Rect2(wand-Vector2(2,2), Vector2(4,4)), Color("#e6acff"))
 	_paint_protagonist()
 	var active: bool = model.phase in [WAVE, SANDBOX]
 	var focus := _focused_fruit() if active and dragged_item < 0 else -1
@@ -479,7 +585,7 @@ func _paint_world() -> void:
 	for i in slot_x.size():
 		var x: float = slot_x[i]
 		var item = model.slots[i]
-		if dragged_item >= 0:
+		if (dragged_item >= 0 and model.phase != REINFORCEMENT) or (model.phase == REINFORCEMENT and item == null):
 			world.draw_rect(Rect2(_fruit_center(i).round() - Vector2(10, 8), Vector2(21, 20)), Color("#fff0a9c8"), false)
 		if item == null:
 			world.draw_rect(Rect2(x - 1, 59, 3, 3), Color("#446252"))
@@ -502,6 +608,8 @@ func _paint_world() -> void:
 		_paint_barricade(barrier)
 	for body in model.bodies:
 		var pos := _vec(body.pos)
+		if body.near_shatter:
+			pos.x += roundf(sin(elapsed * 47))
 		var scaling := Vector2.ONE * float(body.scale)
 		if body.kind == 1 and body.velocity[1] < -300:
 			scaling *= Vector2(0.86, 1.14)
@@ -518,10 +626,20 @@ func _paint_world() -> void:
 			world.draw_set_transform(Vector2.ZERO)
 		else:
 			_stamp(texture, pos, scaling)
+		_paint_graft(body.graft, pos)
+		if body.kind == 1 and body.energy_ratio < 1.0:
+			for side in [-1,1]:
+				var at := pos + Vector2(side * 4, -4)
+				world.draw_polyline(PackedVector2Array([at, at+Vector2(-side,2), at+Vector2(side,3), at+Vector2(0,5)]), INK)
+				if body.near_shatter:
+					world.draw_line(at+Vector2(0,4), at+Vector2(-side*3,8), INK, 2)
+					world.draw_rect(Rect2(pos+Vector2(side*3,6+int(elapsed*12)%4), Vector2(2,3)), GREEN)
 	for enemy in model.monsters:
 		if enemy.kind == 3:
 			continue # The wild enemy is drawn from the hellhound snapshot.
 		var pos := _vec(enemy.pos)
+		if enemy.fragile:
+			world.draw_colored_polygon(PackedVector2Array([pos+Vector2(0,-24), pos+Vector2(3,-20), pos+Vector2(0,-16), pos+Vector2(-3,-20)]), Color("#ce85ff"))
 		var struck: bool = flashes.has(enemy.id)
 		var squash := Vector2.ONE
 		if enemy.kind == 0:
@@ -626,7 +744,7 @@ func _paint_hellhound(dog: Dictionary) -> void:
 		if not wild_reaction.is_empty() and elapsed < wild_reaction.until:
 			pose = wild_reaction.pose
 			reaction_age = elapsed - float(wild_reaction.started)
-	elif pose == "patrol" and elapsed < hound_charge_until:
+	elif pose == "zoomies" or (pose == "patrol" and elapsed < hound_charge_until):
 		pose = "charge"
 	var direction := 1.0 if dog.facing_right else -1.0
 	var frame := floori(elapsed * (22 if pose == "charge" else 9)) % 2
@@ -847,12 +965,15 @@ func _effect(event: Array, combo_hit := false) -> void:
 			hound_charge_until = elapsed + 0.12
 			_debris(pos + Vector2(0, 8), Color("#b78c68"), 6)
 			audio.play("charge")
-		"hellhound_hit":
-			hound_charge_until = elapsed + 0.12
-			effects.append({"pos": pos, "until": elapsed + 0.42, "text": str(int(event[2])),
-				"giant": false, "color": GOLD})
-			_debris(pos, GOLD, 7)
-			audio.play("hit")
+		"shove", "header", "zoomies", "shell":
+			_debris(pos, GREEN if event[0] == "header" else GOLD, 8)
+			audio.play("bonk")
+		"oil":
+			staff_until = elapsed + 0.42
+			effects.append({"pos":pos, "reach":Vector2(52,126), "until":staff_until, "color":Color("#dba7ff")})
+		"fragile":
+			_debris(pos, Color("#c886ff"), 14)
+			effects.append({"pos":pos, "until":elapsed+0.24, "color":Color("#edbfff")})
 		"hellhound_nap":
 			hound_charge_until = 0.0
 			audio.play("bonk")

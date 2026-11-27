@@ -11,6 +11,7 @@ pub enum HellhoundState {
     Tamed,
     Patrolling,
     Charging,
+    Zoomies,
     Dizzy { ticks_left: u32 },
 }
 
@@ -34,6 +35,8 @@ pub struct Hellhound {
     pub stamina: u8,
     pub facing_right: bool,
     cooldown: u32,
+    pub zoom_cooldown: u32,
+    zoom_end: f32,
     charge: Option<ChargeTarget>,
 }
 
@@ -41,6 +44,7 @@ pub struct Hellhound {
 enum ChargeTarget {
     Monster(u32),
     Pumpkin(u32),
+    Melon(u32),
 }
 
 impl Hellhound {
@@ -56,6 +60,8 @@ impl Hellhound {
             stamina: 0,
             facing_right: false,
             cooldown: 0,
+            zoom_cooldown: 0,
+            zoom_end: 0.,
             charge: None,
         }
     }
@@ -72,6 +78,8 @@ impl Hellhound {
             stamina,
             facing_right: true,
             cooldown: 0,
+            zoom_cooldown: 0,
+            zoom_end: 0.,
             charge: None,
         }
     }
@@ -157,22 +165,97 @@ impl Orchard {
         };
         if body.kind != FruitKind::RedApple
             || body.stage == Stage::Small
-            || !matches!(dog.state, HellhoundState::Dizzy { .. })
-            || !dog.pos.within_segment(old, body.pos, body.radius() + 11.)
+            || self.level.companion.is_none()
         {
             return false;
         }
-        dog.stamina = self.level.companion.unwrap().stamina;
-        dog.state = HellhoundState::Patrolling;
-        dog.cooldown = 0;
-        self.events.push_back(VfxEvent::HellhoundRevived(dog.pos));
+        let mouth = Point::new(
+            dog.pos.x + if dog.facing_right { 7. } else { -7. },
+            dog.pos.y,
+        );
+        if !mouth.within_segment(old, body.pos, body.radius() + 6.) {
+            return false;
+        }
+        if matches!(dog.state, HellhoundState::Dizzy { .. }) {
+            dog.stamina = self.level.companion.unwrap().stamina;
+            dog.state = HellhoundState::Patrolling;
+            dog.cooldown = 0;
+            self.events.push_back(VfxEvent::HellhoundRevived(dog.pos));
+        } else if body.angled
+            && dog.zoom_cooldown == 0
+            && dog.pos.x <= self.level.companion.unwrap().patrol_end
+        {
+            dog.state = HellhoundState::Zoomies;
+            dog.facing_right = true;
+            dog.zoom_cooldown = 8 * 120;
+            dog.zoom_end = (dog.pos.x + 0.70 * (crate::SPAWN_X - CHIEF_X)).min(crate::SPAWN_X);
+            dog.charge = None;
+            self.stats.assists.zoomies += 1;
+            self.events.push_back(VfxEvent::Zoomies(
+                dog.pos,
+                Hellhound::on_slope(dog.zoom_end),
+            ));
+        } else {
+            return false;
+        }
         true
+    }
+
+    fn kick_pumpkin(&mut self, index: usize) {
+        let mut body = self.barricades.remove(index).body;
+        body.rolling = true;
+        body.heavy_hits = 0;
+        body.velocity = Point::new(125., 125. * SLOPE);
+        // Keep the contact that parked this shell until it has cleared the enemy.
+        let radius = body.radius();
+        body.hit.retain(|id| {
+            self.monsters
+                .iter()
+                .any(|m| m.id == *id && (m.pos.x - body.pos.x).abs() <= m.kind.radius() + radius)
+        });
+        self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
+        self.stats.assists.pumpkin_headers += 1;
+        self.bodies.push(body);
     }
 
     pub(crate) fn update_companion(&mut self) {
         let (Some(config), Some(mut dog)) = (self.level.companion, self.hellhound) else {
             return;
         };
+        dog.zoom_cooldown = dog.zoom_cooldown.saturating_sub(1);
+        if matches!(dog.state, HellhoundState::Zoomies) {
+            let end = (dog.pos.x + 670. * DT).min(dog.zoom_end);
+            let path = dog.pos.x - 10. ..=end + 10.;
+            for monster in &mut self.monsters {
+                if path.contains(&monster.pos.x) && monster.last_zoom != self.stats.assists.zoomies
+                {
+                    monster.knockback = config.knockback * 1.6;
+                    monster.last_zoom = self.stats.assists.zoomies;
+                    self.stats.assists.shoves += 1;
+                    self.events.push_back(VfxEvent::HoundShove(monster.pos));
+                }
+            }
+            while let Some(i) = self
+                .barricades
+                .iter()
+                .position(|p| path.contains(&p.body.pos.x))
+            {
+                self.kick_pumpkin(i);
+            }
+            dog.pos = Hellhound::on_slope(end);
+            if end == dog.zoom_end {
+                dog.state = HellhoundState::Patrolling;
+                dog.facing_right = false;
+            }
+            self.hellhound = Some(dog);
+            return;
+        }
+        if dog.pos.x > config.patrol_end {
+            dog.pos =
+                Hellhound::on_slope((dog.pos.x - config.charge_speed * DT).max(config.patrol_end));
+            self.hellhound = Some(dog);
+            return;
+        }
         if let HellhoundState::Dizzy { ticks_left } = dog.state {
             dog.state = if ticks_left > 1 {
                 HellhoundState::Dizzy {
@@ -215,6 +298,19 @@ impl Orchard {
             return;
         }
 
+        if let Some(melon) = self
+            .bodies
+            .iter()
+            .filter(|b| {
+                b.near_shatter()
+                    && b.velocity.y > 0.
+                    && (b.pos.x - x).abs() < config.charge_range
+                    && (min..=max).contains(&b.pos.x)
+            })
+            .min_by(|a, b| a.pos.y.total_cmp(&b.pos.y).reverse())
+        {
+            dog.charge = Some(ChargeTarget::Melon(melon.id));
+        }
         if dog.cooldown == 0 && dog.charge.is_none() {
             let in_range = |target: f32| {
                 target >= x - 8. && target <= (x + config.charge_range).min(max + 10.)
@@ -233,7 +329,9 @@ impl Orchard {
                                 && in_range(monster.pos.x)
                                 && matches!(
                                     monster.kind,
-                                    MonsterKind::GreenSlime | MonsterKind::Shield
+                                    MonsterKind::GreenSlime
+                                        | MonsterKind::Shield
+                                        | MonsterKind::IronBoar
                                 )
                         })
                         .min_by(|a, b| a.pos.x.total_cmp(&b.pos.x))
@@ -250,6 +348,9 @@ impl Orchard {
                 .iter()
                 .find(|m| m.id == id && m.hp > 0)
                 .map(|m| m.pos.x),
+            Some(ChargeTarget::Melon(id)) => {
+                self.bodies.iter().find(|b| b.id == id).map(|b| b.pos.x)
+            }
             Some(ChargeTarget::Pumpkin(id)) => self
                 .barricades
                 .iter()
@@ -271,14 +372,25 @@ impl Orchard {
             match dog.charge.take().unwrap() {
                 ChargeTarget::Monster(id) => {
                     let monster = self.monsters.iter_mut().find(|m| m.id == id).unwrap();
-                    let damage = config.damage.min(monster.hp);
-                    monster.hp -= damage;
                     monster.knockback += config.knockback;
-                    self.stats.hellhound.record(damage, monster.hp == 0);
-                    self.events
-                        .push_back(VfxEvent::HellhoundHit(monster.pos, damage));
-                    if monster.hp == 0 {
-                        self.events.push_back(VfxEvent::MonsterDie(monster.pos));
+                    self.stats.assists.shoves += 1;
+                    self.events.push_back(VfxEvent::HoundShove(monster.pos));
+                }
+                ChargeTarget::Melon(id) => {
+                    let melon = self.bodies.iter_mut().find(|b| b.id == id).unwrap();
+                    dog.state = HellhoundState::Charging;
+                    if melon.pos.y + melon.radius() >= dog.pos.y - 6. {
+                        melon.velocity = Point::new(-28., -470.);
+                        melon.energy_ratio = 1.;
+                        melon.hit.clear();
+                        melon.trellis_contacts = 0;
+                        melon.trellis_grazes = 0;
+                        self.stats.assists.melon_headers += 1;
+                        self.events.push_back(VfxEvent::MelonHeader(melon.pos));
+                    } else {
+                        dog.charge = Some(ChargeTarget::Melon(id));
+                        self.hellhound = Some(dog);
+                        return;
                     }
                 }
                 ChargeTarget::Pumpkin(id) => {
@@ -287,13 +399,7 @@ impl Orchard {
                         .iter()
                         .position(|b| b.body.id == id)
                         .unwrap();
-                    let mut body = self.barricades.remove(index).body;
-                    let speed = 125.;
-                    body.rolling = true;
-                    body.velocity = Point::new(speed, speed * SLOPE);
-                    body.hit.clear();
-                    self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
-                    self.bodies.push(body);
+                    self.kick_pumpkin(index);
                 }
             }
             dog.cooldown = config.cooldown_ticks;

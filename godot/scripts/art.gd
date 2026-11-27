@@ -23,12 +23,27 @@ const FRUIT := [
 		"...ODDDODDDPDDODDDDO....", "....OOODODDDDOODOOO.....", "......OOOODDOOOO........",
 		"..........OOO...........", "........................", "........................", "........................",
 	],
+	[
+		"......LlL.....", "...LLLllLL....", "....LLTLL.....", "...OOO.OOO....",
+		"..OPPHOPPHO...", ".OPPHPOPPPDO..", ".OPPPDOOPPDO..", "..ODDOPOODO...",
+		"...OPPHPOPO...", "...OPPPPDDO...", "....ODDDDO....", ".....OPPO.....",
+		"......OO......", "..............",
+	],
 ]
 const FRUIT_PALETTES := [
 	{"O": "#522639", "L": "#22744b", "l": "#96cf52", "T": "#77523a", "R": "#f4504f", "D": "#ce3548", "H": "#ffc095"},
 	{"O": "#23493d", "L": "#489448", "l": "#a2d45d", "T": "#77523a", "H": "#d9eb8b", "o": "#286d49"},
 	{"O": "#633b31", "L": "#3b7f42", "l": "#93ca59", "T": "#70502e", "P": "#ffad47", "D": "#e27232", "H": "#ffe498"},
+	{"O": "#39314a", "L": "#42983e", "l": "#d4f882", "T": "#785b50", "P": "#ad59bf", "D": "#693f91", "H": "#ffc1eb"},
 ]
+const LULUCY := [
+	"....O.....O.....", "...OVO...OVO....", "...OVVOOOVVO....", "....OVVVVVO.....",
+	"...OVHHHHVVO....", "...OHREERHHO....", "....OEFFEO......", "...OVOEEOVO.....",
+	"..OVVVRRVVVO....", ".OVVVORROVVVO...", "OVVVOORROOVVVO..", "OOOVORRRROVOOO..",
+	"..OORWRRWROO....", "...ORRRRRRO.....", "..ORRRRRRRRO....", ".OOOOOOOOOOOO...",
+	"....OB..BO......", "...OOO..OOO.....",
+]
+const ALCHEMIST_PALETTE := {"O":"#30253d","V":"#8c54a6","H":"#dfc5ed","R":"#9c3e68","E":"#f3c7ae","F":"#fff6df","W":"#edab83","B":"#534157"}
 const SLIME := [
 	"................", "................", ".....OOOOO......", "...OOLLLHOO.....",
 	"..OLLLHHLLLO....", "..OLLHLLLLLLO...", ".OLLLOOLLOLLLO..", ".OLLLOWLLOWLLO..",

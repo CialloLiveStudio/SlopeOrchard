@@ -1,11 +1,11 @@
 use slope_orchard_core::balance::{run, seconds, warnings, Config, Outcome, CONFIGS, SEED_COUNT};
-use slope_orchard_core::Phase;
+use slope_orchard_core::{balance::Strategy, FruitKind, LevelId, Phase};
 
 fn percent(part: u32, total: u32) -> f32 {
     100. * part as f32 / total.max(1) as f32
 }
 
-fn report(config: Config, outcomes: &[Outcome]) {
+fn report(config: Config, outcomes: &[Outcome]) -> (f32, usize) {
     let count = outcomes.len() as u32;
     let wins = outcomes
         .iter()
@@ -49,8 +49,22 @@ fn report(config: Config, outcomes: &[Outcome]) {
     let shares =
         totals.map(|(damage, kills)| (percent(damage, damage_total), percent(kills, kill_total)));
     let columns = shares.map(|(damage, kills)| format!("{damage:.1}/{kills:.1}"));
+    let assists: [u32; 6] = outcomes.iter().fold([0; 6], |mut sums, outcome| {
+        let a = outcome.assists;
+        for (sum, n) in sums.iter_mut().zip([
+            a.shoves,
+            a.pumpkin_headers,
+            a.melon_headers,
+            a.zoomies,
+            a.detonations,
+            a.bonus_damage,
+        ]) {
+            *sum += n;
+        }
+        sums
+    });
     println!(
-        "{:?} | {:11} | {:6.1}% | {:11.2} | {:>16} | {:>21} | {:>11} | {:>11} | {:>11} | {:>11}",
+        "{:?} | {:11} | {:6.1}% | {:11.2} | {:>16} | {:>21} | {:>11} | {:>11} | {:>11} | {:>11} | {:?}",
         config.level,
         config.strategy.name(),
         win_rate,
@@ -60,41 +74,40 @@ fn report(config: Config, outcomes: &[Outcome]) {
         columns[0],
         columns[1],
         columns[2],
-        columns[3],
+        columns[3], assists,
     );
 
-    for warning in warnings(config, win_rate, hp, shares) {
-        println!("   [WARN] {warning}");
+    let mut issues = warnings(config, win_rate, hp, shares);
+    if matches!(config.strategy, Strategy::Skilled | Strategy::Grafted) {
+        if let Some(run) = outcomes
+            .iter()
+            .find(|o| o.first_damage_tick.is_some_and(|t| t < 15 * 120))
+        {
+            issues.push(format!("Damage before 15s on seed {}", run.seed));
+        }
+    }
+    if outcomes
+        .iter()
+        .any(|o| !matches!(o.phase, Phase::Victory | Phase::Defeat))
+    {
+        issues.push("Simulation timed out".into());
+    }
+    if config.level == LevelId::T5 && (assists[4] == 0 || assists[5] == 0) {
+        issues.push("No fragile oil burst contribution".into());
     }
     let examples = outcomes
         .iter()
-        .filter(|outcome| {
-            outcome.phase != Phase::Victory
-                || outcome.hp <= 1
-                || percent(
-                    outcome.contributions[3].kills,
-                    outcome.contributions.iter().map(|c| c.kills).sum(),
-                ) > 35.
-        })
+        .filter(|o| o.phase != Phase::Victory || o.hp <= 1)
         .take(3)
-        .map(|outcome| {
-            let result = match outcome.phase {
-                Phase::Victory => "close win",
-                Phase::Defeat => "defeat",
-                _ => "timeout",
-            };
-            let first = outcome
-                .first_damage_tick
-                .map_or("—".to_owned(), |tick| format!("{:.1}s", seconds(tick)));
-            format!(
-                "{} ({result}, {} HP, first damage {first}, peak {})",
-                outcome.seed, outcome.hp, outcome.max_concurrent_monsters
-            )
-        })
+        .map(|o| format!("{} ({:?}, {} HP)", o.seed, o.phase, o.hp))
         .collect::<Vec<_>>();
     if !examples.is_empty() {
         println!("   Seeds {}", examples.join(", "));
     }
+    for issue in &issues {
+        println!("   [WARN] {issue}");
+    }
+    (hp, issues.len())
 }
 
 fn main() {
@@ -103,24 +116,41 @@ fn main() {
         SEED_COUNT - 1
     );
     println!("Damage/kill columns are percent. First damage is to the protagonist (number of affected runs).");
-    println!("Lv | Strategy    | WinRate | AvgRemainHP | AvgFirstDmgTime  | MaxConcurrentMonsters |   Apple D/K |   Melon D/K | Pumpkin D/K |    Hound D/K");
+    println!("Lv | Strategy    | WinRate | AvgRemainHP | AvgFirstDmgTime  | MaxConcurrentMonsters |   Apple D/K |   Melon D/K | Pumpkin D/K |    Berry D/K | Assists [shoves, pumpkin headers, melon headers, zoomies, detonations, bonus HP]");
+    let mut mixed_hp = 0.;
+    let mut pumpkin_hp = 0.;
+    let mut violations = 0;
     for config in CONFIGS {
         let outcomes = (0..SEED_COUNT)
             .map(|seed| run(config, seed))
             .collect::<Vec<_>>();
-        report(config, &outcomes);
+        let (hp, issues) = report(config, &outcomes);
+        violations += issues;
+        if config.level == LevelId::T2 {
+            match config.strategy {
+                Strategy::Skilled => mixed_hp = hp,
+                Strategy::CheeseAuditor(FruitKind::BowlingPumpkin) => pumpkin_hp = hp,
+                _ => {}
+            }
+        }
+    }
+    if mixed_hp - pumpkin_hp < 1.0 {
+        println!("   [WARN] T2 All-Pumpkin must finish at least 1 HP below mixed Skilled");
+        violations += 1;
+    }
+    if violations != 0 {
+        std::process::exit(1);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slope_orchard_core::{balance::Strategy, LevelId};
 
     #[test]
     fn balance_sim_smoke() {
         assert!(SEED_COUNT >= 128);
-        for level in [LevelId::T1, LevelId::T2] {
+        for level in [LevelId::T1, LevelId::T2, LevelId::T5] {
             let config = Config {
                 level,
                 strategy: Strategy::Skilled,
@@ -128,6 +158,7 @@ mod tests {
             let first = run(config, 7);
             let repeat = run(config, 7);
             assert!(matches!(first.phase, Phase::Victory | Phase::Defeat));
+            assert!(first.first_damage_tick.is_none_or(|t| t >= 15 * 120));
             assert_eq!(first.phase, repeat.phase);
             assert_eq!(first.hp, repeat.hp);
             assert_eq!(first.first_damage_tick, repeat.first_damage_tick);

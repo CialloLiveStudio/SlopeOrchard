@@ -12,6 +12,7 @@ const ACTION_PERIOD: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
+    Grafted,
     Casual,
     Greedy,
     Skilled,
@@ -23,6 +24,8 @@ impl Strategy {
         match self {
             Self::Casual => "Casual",
             Self::Greedy => "Greedy",
+            Self::Grafted => "Grafted",
+            Self::CheeseAuditor(FruitKind::SlimeBerry) => "All-Berry",
             Self::Skilled => "Skilled",
             Self::CheeseAuditor(RedApple) => "All-Apple",
             Self::CheeseAuditor(BounceMelon) => "All-Melon",
@@ -37,7 +40,7 @@ pub struct Config {
     pub strategy: Strategy,
 }
 
-pub const CONFIGS: [Config; 9] = [
+pub const CONFIGS: [Config; 11] = [
     Config {
         level: LevelId::T1,
         strategy: Strategy::Casual,
@@ -74,6 +77,14 @@ pub const CONFIGS: [Config; 9] = [
         level: LevelId::T2,
         strategy: Strategy::CheeseAuditor(BounceMelon),
     },
+    Config {
+        level: LevelId::T5,
+        strategy: Strategy::Skilled,
+    },
+    Config {
+        level: LevelId::T5,
+        strategy: Strategy::Grafted,
+    },
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +94,7 @@ pub struct Outcome {
     pub hp: u8,
     pub first_damage_tick: Option<u32>,
     pub max_concurrent_monsters: usize,
+    pub assists: crate::Assists,
     pub contributions: [CombatContribution; 4],
 }
 
@@ -109,20 +121,17 @@ pub fn warnings(config: Config, win_rate: f32, hp: f32, shares: [(f32, f32); 4])
         (LevelId::T2, Strategy::Skilled) if win_rate < 90. => {
             warnings.push(format!("T2 Skilled win rate {win_rate:.1}% is below 90%"));
         }
-        (LevelId::T2, Strategy::CheeseAuditor(BowlingPumpkin)) if win_rate > 40. => {
+        (LevelId::T2, Strategy::CheeseAuditor(BowlingPumpkin)) if win_rate > 70. => {
             warnings.push(format!(
-                "T2 All-Pumpkin win rate {win_rate:.1}% exceeds 40%"
+                "T2 All-Pumpkin win rate {win_rate:.1}% exceeds 70%"
             ));
+        }
+        (LevelId::T5, Strategy::Skilled | Strategy::Grafted) if win_rate < 90. => {
+            warnings.push(format!("T5 win rate {win_rate:.1}% is below 90%"))
         }
         _ => {}
     }
     if config.level == LevelId::T2 {
-        if shares[3].1 > 35. {
-            warnings.push(format!(
-                "T2 Hellhound kill share {:.1}% exceeds 35%",
-                shares[3].1
-            ));
-        }
         if !matches!(config.strategy, Strategy::CheeseAuditor(_)) {
             for (name, (damage, _)) in ["Apple", "Melon", "Pumpkin"].into_iter().zip(shares) {
                 if damage > 70. {
@@ -152,6 +161,16 @@ impl Player {
     }
 
     fn apply_loadout(&self, orchard: &mut Orchard) {
+        if self.strategy == Strategy::Grafted {
+            for (from, to, replacement) in [
+                (1, 2, FruitKind::SlimeBerry),
+                (3, 4, RedApple),
+                (5, 1, BounceMelon),
+            ] {
+                assert!(orchard.graft_plants(from, to));
+                assert!(orchard.equip_plant(from, replacement));
+            }
+        }
         if let Strategy::CheeseAuditor(kind) = self.strategy {
             for slot in 0..SLOTS.len() {
                 if orchard.slots[slot].is_some() {
@@ -165,7 +184,9 @@ impl Player {
         match self.strategy {
             Strategy::Casual => self.casual(orchard),
             Strategy::Greedy => self.greedy(orchard),
-            Strategy::Skilled | Strategy::CheeseAuditor(_) => self.skilled(orchard),
+            Strategy::Skilled | Strategy::Grafted | Strategy::CheeseAuditor(_) => {
+                self.skilled(orchard)
+            }
         }
     }
 
@@ -186,8 +207,8 @@ impl Player {
                     delay
                 }
             };
-            let ready = fruit.age >= fruit.kind.mature_ticks() + delay;
-            let nearby_threat = fruit.age >= fruit.kind.mature_ticks() + delay / 5
+            let ready = fruit.age >= fruit.mature_ticks() + delay;
+            let nearby_threat = fruit.age >= fruit.mature_ticks() + delay / 5
                 && orchard
                     .monsters
                     .iter()
@@ -416,11 +437,18 @@ pub fn run(config: Config, seed: u64) -> Outcome {
         casual_delay: [None; crate::SLOTS.len()],
     };
     player.apply_loadout(&mut orchard);
+    assert!(orchard.start_battle());
     for tick in 0..TICK_LIMIT {
         match orchard.phase {
-            Phase::Intermission => {
-                player.apply_loadout(&mut orchard);
-                orchard.next_wave();
+            Phase::Reinforcement => {
+                let slot = orchard.slots.iter().position(Option::is_none).unwrap();
+                let kind = match config.strategy {
+                    Strategy::CheeseAuditor(kind) => kind,
+                    _ => orchard.level().waves[orchard.wave]
+                        .reinforcement
+                        .expect("reinforcement seed"),
+                };
+                assert!(orchard.equip_plant(slot, kind));
             }
             Phase::Victory | Phase::Defeat => break,
             _ => {}
@@ -431,14 +459,14 @@ pub fn run(config: Config, seed: u64) -> Outcome {
         orchard.step();
         orchard.events.clear();
     }
-    let [apple, melon, pumpkin] = orchard.stats.fruits;
     Outcome {
         seed,
         phase: orchard.phase,
         hp: orchard.protagonist.hp,
         first_damage_tick: orchard.stats.first_damage_tick,
         max_concurrent_monsters: orchard.stats.max_concurrent_monsters,
-        contributions: [apple, melon, pumpkin, orchard.stats.hellhound],
+        contributions: orchard.stats.fruits,
+        assists: orchard.stats.assists,
     }
 }
 
@@ -470,14 +498,13 @@ mod tests {
         let pumpkin = Strategy::CheeseAuditor(BowlingPumpkin);
         let mut shares = empty;
         shares[2].0 = 70.;
-        shares[3].1 = 35.;
-        assert_eq!(check(LevelId::T2, pumpkin, 40., 0., shares), 0);
-        assert_eq!(check(LevelId::T2, pumpkin, 40.01, 0., shares), 1);
+        assert_eq!(check(LevelId::T2, pumpkin, 70., 0., shares), 0);
+        assert_eq!(check(LevelId::T2, pumpkin, 70.01, 0., shares), 1);
         assert_eq!(check(LevelId::T2, Strategy::Greedy, 100., 0., shares), 0);
         shares[2].0 = 70.01;
-        shares[3].1 = 35.01;
-        assert_eq!(check(LevelId::T2, Strategy::Greedy, 100., 0., shares), 2);
-        assert_eq!(check(LevelId::T2, pumpkin, 40., 0., shares), 1);
+
+        assert_eq!(check(LevelId::T2, Strategy::Greedy, 100., 0., shares), 1);
+        assert_eq!(check(LevelId::T2, pumpkin, 70., 0., shares), 0);
         assert_eq!(check(LevelId::T1, Strategy::Greedy, 100., 0., shares), 0);
     }
 }

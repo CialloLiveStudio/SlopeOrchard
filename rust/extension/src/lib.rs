@@ -1,7 +1,7 @@
 use godot::prelude::*;
 use serde_json::{json, Value};
 use slope_orchard_core::{
-    Body, FruitKind, HellhoundState, LevelId, Orchard, Point, SlotItem, VfxEvent, DT,
+    Body, FruitKind, HellhoundState, LevelId, Orchard, Phase, Point, SlotItem, VfxEvent, DT,
     HOME_RUN_COOLDOWN, SLOTS, TRELLIS_Y,
 };
 
@@ -25,10 +25,10 @@ fn item(value: Option<SlotItem>) -> Value {
     match value {
         Some(SlotItem::Fruit(fruit)) => json!({
             "type": "fruit",
-            "kind": fruit.kind as u8, "stage": fruit.stage() as u8, "scale": fruit.stage().scale(),
+            "kind": fruit.kind as u8, "graft": fruit.graft.map(|k| k as u8), "stage": fruit.stage() as u8, "scale": fruit.stage().scale(),
             "age": fruit.age, "hanging": fruit.hanging(),
             "growth": fruit.growth(),
-            "giant_age": fruit.age.saturating_sub(fruit.kind.growth_ticks()),
+            "giant_age": fruit.age.saturating_sub(fruit.growth_ticks()),
         }),
         Some(SlotItem::Chime { cooldown }) => json!({ "type": "chime", "cooldown": cooldown }),
         None => Value::Null,
@@ -40,7 +40,7 @@ fn body_snapshot(body: &Body) -> Value {
         "id": body.id, "kind": body.kind as u8, "stage": body.stage as u8,
         "scale": body.stage.scale(), "pos": point(body.pos), "velocity": point(body.velocity),
         "rolling": body.rolling, "bounces": body.bounces, "combo_bounces": body.combo_bounces,
-        "home_run": body.home_run,
+        "home_run": body.home_run, "graft": body.graft.map(|k| k as u8), "energy_ratio": body.energy_ratio, "near_shatter": body.near_shatter(),
     })
 }
 
@@ -48,6 +48,7 @@ fn level_key(id: LevelId) -> &'static str {
     match id {
         LevelId::T1 => "t1",
         LevelId::T2 => "t2",
+        LevelId::T5 => "t5",
         LevelId::Sandbox => "sandbox",
     }
 }
@@ -68,6 +69,7 @@ fn hellhound_snapshot(orchard: &Orchard) -> Value {
         ),
         HellhoundState::Tamed => ("companion", "tamed", 0, dog.tame_max, 0),
         HellhoundState::Patrolling => ("companion", "patrol", 0, 0, 0),
+        HellhoundState::Zoomies => ("companion", "zoomies", 0, 0, 0),
         HellhoundState::Charging => ("companion", "charge", 0, 0, 0),
         HellhoundState::Dizzy { ticks_left } => ("companion", "nap", 0, 0, ticks_left),
     };
@@ -75,7 +77,7 @@ fn hellhound_snapshot(orchard: &Orchard) -> Value {
     json!({
         "present": true, "sandbox_enabled": sandbox_enabled,
         "mode": mode, "state": state, "pos": point(dog.pos), "facing_right": dog.facing_right,
-        "stamina": dog.stamina, "max_stamina": config.map_or(0, |companion| companion.stamina),
+        "zoom_cooldown": dog.zoom_cooldown, "stamina": dog.stamina, "max_stamina": config.map_or(0, |companion| companion.stamina),
         "wild_hp": wild_hp, "wild_max_hp": wild_max_hp, "tame_progress": dog.tame_progress, "tame_max": dog.tame_max,
         "nap_ticks_left": nap_ticks_left, "nap_seconds_left": nap_ticks_left as f32 * DT,
         "nap_seconds_total": config.map_or(0., |companion| companion.nap_ticks as f32 * DT),
@@ -130,8 +132,27 @@ impl OrchardBridge {
     }
 
     #[func]
-    fn next_wave(&mut self) -> bool {
-        self.orchard.next_wave()
+    fn start_battle(&mut self) -> bool {
+        self.orchard.start_battle()
+    }
+
+    #[func]
+    fn retry(&mut self, direct: bool) -> bool {
+        let accepted = self.orchard.retry(direct);
+        if accepted {
+            self.debt = 0.;
+        }
+        accepted
+    }
+
+    #[func]
+    fn remove_plant(&mut self, slot: i32) -> bool {
+        self.orchard.remove_plant(slot as usize)
+    }
+
+    #[func]
+    fn graft_plants(&mut self, from: i32, to: i32) -> bool {
+        self.orchard.graft_plants(from as usize, to as usize)
     }
 
     #[func]
@@ -140,6 +161,7 @@ impl OrchardBridge {
             0 => FruitKind::RedApple,
             1 => FruitKind::BounceMelon,
             2 => FruitKind::BowlingPumpkin,
+            3 => FruitKind::SlimeBerry,
             _ => return false,
         };
         self.orchard.equip_plant(slot as usize, kind)
@@ -164,6 +186,7 @@ impl OrchardBridge {
         let id = match id.to_string().as_str() {
             "t1" => LevelId::T1,
             "t2" => LevelId::T2,
+            "t5" => LevelId::T5,
             "sandbox" => LevelId::Sandbox,
             _ => return false,
         };
@@ -185,8 +208,13 @@ impl OrchardBridge {
     }
 
     #[func]
-    fn set_sandbox_companion(&mut self, enabled: bool) -> bool {
-        self.orchard.set_sandbox_companion(enabled)
+    fn set_hellhound(&mut self, enabled: bool) -> bool {
+        self.orchard.set_hellhound(enabled)
+    }
+
+    #[func]
+    fn set_lulucy(&mut self, enabled: bool) -> bool {
+        self.orchard.set_lulucy(enabled)
     }
 
     #[func]
@@ -210,7 +238,7 @@ impl OrchardBridge {
             .iter()
             .map(|zone| {
                 json!({
-                    "left": zone.left, "right": zone.right, "ticks_left": zone.ticks_left,
+                    "kind": zone.kind as u8, "left": zone.left, "right": zone.right, "ticks_left": zone.ticks_left,
                 })
             })
             .collect();
@@ -219,12 +247,32 @@ impl OrchardBridge {
             .iter()
             .map(|monster| {
                 json!({
-                    "id": monster.id, "kind": monster.kind as u8, "hp": monster.hp,
+                    "id": monster.id, "kind": monster.kind as u8, "hp": monster.hp, "fragile": monster.fragile,
                     "max_hp": monster.kind.hp(), "lid_hp": monster.lid_hp, "pos": point(monster.pos),
                 })
             })
             .collect();
+        let mut preview = Vec::new();
+        for kind in level
+            .waves
+            .iter()
+            .flat_map(|w| w.spawns)
+            .flat_map(|g| g.pattern)
+        {
+            if !preview.contains(&(*kind as u8)) {
+                preview.push(*kind as u8);
+            }
+        }
         json!({
+            "stage": match state.phase {
+                Phase::Prep => "Prep", Phase::Battle | Phase::Reinforcement => "Battle",
+                Phase::Victory | Phase::Defeat => "Result", Phase::Sandbox => "Sandbox",
+            },
+            "preview": preview, "can_configure": orchard.can_configure(),
+            "plant_limit": orchard.plant_limit(), "next_level": level.next_level().map(level_key),
+            "available_plants": level.available_plants.iter().map(|k| *k as u8).collect::<Vec<_>>(),
+            "grafting": orchard.grafting_unlocked(), "lulucy": orchard.lulucy,
+            "companion_slots": if orchard.grafting_unlocked() {2} else {usize::from(level.companion.is_some())},
             "level_id": level_key(state.level), "level_name": level.display_name,
             "wave": state.wave, "wave_count": level.waves.len(),
             "phase": state.phase as u8, "unlocked_slots": state.unlocked_slots,
@@ -311,7 +359,12 @@ impl OrchardBridge {
                 VfxEvent::WildSour(pos) => json!(["wild_sour", point(pos)]),
                 VfxEvent::Tamed(pos) => json!(["tamed", point(pos)]),
                 VfxEvent::HellhoundCharge(pos) => json!(["hellhound_charge", point(pos)]),
-                VfxEvent::HellhoundHit(pos, damage) => json!(["hellhound_hit", point(pos), damage]),
+                VfxEvent::HoundShove(pos) => json!(["shove", point(pos)]),
+                VfxEvent::Zoomies(from, to) => json!(["zoomies", point(from), point(to)]),
+                VfxEvent::MelonHeader(pos) => json!(["header", point(pos)]),
+                VfxEvent::OilCast(pos) => json!(["oil", point(pos)]),
+                VfxEvent::FragileBurst(pos) => json!(["fragile", point(pos)]),
+                VfxEvent::ShellCrack(pos) => json!(["shell", point(pos)]),
                 VfxEvent::HellhoundDizzy(pos) => json!(["hellhound_nap", point(pos)]),
                 VfxEvent::HellhoundRevived(pos) => json!(["hellhound_revived", point(pos)]),
             })

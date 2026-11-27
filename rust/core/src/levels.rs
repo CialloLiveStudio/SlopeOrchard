@@ -1,18 +1,18 @@
 use crate::{FruitKind, MonsterKind};
 
-use FruitKind::{BounceMelon, BowlingPumpkin, RedApple};
+use FruitKind::{BounceMelon, BowlingPumpkin, RedApple, SlimeBerry};
 use MonsterKind::{GreenSlime, IronBoar, Shield, WildHellhound};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelId {
     T1,
     T2,
+    T5,
     Sandbox,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct SpawnGroup {
-    pub spawn_x: f32,
     pub first_tick: u32,
     pub interval: u32,
     pub jitter: u32,
@@ -22,7 +22,8 @@ pub struct SpawnGroup {
 
 #[derive(Debug, Clone, Copy)]
 pub struct WaveDef {
-    pub new_plants: &'static [FruitKind],
+    /// Suggested crop for the extra seed granted on entry to this wave.
+    pub reinforcement: Option<FruitKind>,
     pub spawns: &'static [SpawnGroup],
 }
 
@@ -40,7 +41,6 @@ pub struct CompanionDef {
     pub patrol_speed: f32,
     pub charge_range: f32,
     pub charge_speed: f32,
-    pub damage: u8,
     pub knockback: f32,
     pub cooldown_ticks: u32,
     pub stamina: u8,
@@ -61,7 +61,7 @@ pub struct LevelDef {
     pub rolling_friction: f32,
     pub knockback_retention: f32,
     pub wind_base: f32,
-    pub sandbox_opening: &'static [(MonsterKind, f32)],
+    pub sandbox_opening: &'static [MonsterKind],
     pub sandbox_reinforcements: Option<SpawnGroup>,
 }
 
@@ -70,6 +70,7 @@ impl LevelDef {
         match id {
             LevelId::T1 => &T1,
             LevelId::T2 => &T2,
+            LevelId::T5 => &T5,
             LevelId::Sandbox => &SANDBOX,
         }
     }
@@ -77,7 +78,8 @@ impl LevelDef {
     pub fn next_level(&self) -> Option<LevelId> {
         match self.id {
             LevelId::T1 => Some(LevelId::T2),
-            LevelId::T2 => Some(LevelId::Sandbox),
+            LevelId::T2 => Some(LevelId::T5),
+            LevelId::T5 => None,
             LevelId::Sandbox => None,
         }
     }
@@ -91,7 +93,6 @@ const fn group(
     pattern: &'static [MonsterKind],
 ) -> SpawnGroup {
     SpawnGroup {
-        spawn_x: crate::SPAWN_X,
         first_tick,
         interval,
         jitter,
@@ -105,8 +106,7 @@ const COMPANION: CompanionDef = CompanionDef {
     patrol_speed: 24.,
     charge_range: 44.,
     charge_speed: 155.,
-    damage: 1,
-    knockback: 105.,
+    knockback: 300.,
     cooldown_ticks: 420,
     stamina: 3,
     nap_ticks: 12 * 120,
@@ -122,15 +122,15 @@ static T1: LevelDef = LevelDef {
     companion: None,
     waves: &[
         WaveDef {
-            new_plants: &[],
+            reinforcement: None,
             spawns: &[group(120, 386, 35, 5, &[GreenSlime])],
         },
         WaveDef {
-            new_plants: &[],
+            reinforcement: None,
             spawns: &[group(100, 305, 48, 7, &[GreenSlime])],
         },
         WaveDef {
-            new_plants: &[],
+            reinforcement: None,
             spawns: &[
                 group(100, 270, 30, 4, &[GreenSlime]),
                 group(1210, 1, 45, 1, &[WildHellhound]),
@@ -165,18 +165,14 @@ static T2: LevelDef = LevelDef {
     companion: Some(COMPANION),
     waves: &[
         WaveDef {
-            new_plants: &[],
+            reinforcement: None,
             spawns: &[
-                // A nearby opening pack rewards fast-growing fruit before the main wave arrives.
-                SpawnGroup {
-                    spawn_x: 185.,
-                    ..group(0, 78, 100, 6, &[GreenSlime])
-                },
+                group(0, 78, 100, 6, &[GreenSlime]),
                 group(100, 229, 60, 9, &[GreenSlime, IronBoar, Shield, GreenSlime]),
             ],
         },
         WaveDef {
-            new_plants: &[BounceMelon],
+            reinforcement: Some(BounceMelon),
             spawns: &[group(
                 90,
                 240,
@@ -186,12 +182,12 @@ static T2: LevelDef = LevelDef {
             )],
         },
         WaveDef {
-            new_plants: &[],
+            reinforcement: None,
             spawns: &[group(
                 70,
-                167,
+                210,
                 105,
-                22,
+                19,
                 &[IronBoar, Shield, IronBoar, GreenSlime, IronBoar],
             )],
         },
@@ -200,6 +196,55 @@ static T2: LevelDef = LevelDef {
     rolling_friction: 1.,
     knockback_retention: 0.976,
     wind_base: 1.05,
+    sandbox_opening: &[],
+    sandbox_reinforcements: None,
+};
+
+static T5: LevelDef = LevelDef {
+    id: LevelId::T5,
+    display_name: "炼金果园",
+    initial_plants: &[
+        (0, RedApple),
+        (1, SlimeBerry),
+        (2, BounceMelon),
+        (3, RedApple),
+        (4, BowlingPumpkin),
+        (5, SlimeBerry),
+    ],
+    available_plants: &[RedApple, BounceMelon, BowlingPumpkin, SlimeBerry],
+    initial_chime_slot: None,
+    companion_enabled: true,
+    companion: Some(COMPANION),
+    waves: &[
+        WaveDef {
+            reinforcement: None,
+            spawns: &[group(
+                30,
+                145,
+                60,
+                12,
+                &[GreenSlime, Shield, GreenSlime, IronBoar],
+            )],
+        },
+        WaveDef {
+            reinforcement: None,
+            spawns: &[group(45, 120, 45, 18, &[Shield, IronBoar, GreenSlime])],
+        },
+        WaveDef {
+            reinforcement: None,
+            spawns: &[group(
+                30,
+                105,
+                45,
+                24,
+                &[IronBoar, GreenSlime, Shield, Shield],
+            )],
+        },
+    ],
+    tame_fight: None,
+    rolling_friction: 1.,
+    knockback_retention: 0.976,
+    wind_base: 1.,
     sandbox_opening: &[],
     sandbox_reinforcements: None,
 };
@@ -214,7 +259,7 @@ static SANDBOX: LevelDef = LevelDef {
         (4, RedApple),
         (5, BowlingPumpkin),
     ],
-    available_plants: &[RedApple, BounceMelon, BowlingPumpkin],
+    available_plants: &[RedApple, BounceMelon, BowlingPumpkin, SlimeBerry],
     initial_chime_slot: Some(3),
     companion_enabled: true,
     companion: Some(COMPANION),
@@ -223,7 +268,7 @@ static SANDBOX: LevelDef = LevelDef {
     rolling_friction: 1.,
     knockback_retention: 0.976,
     wind_base: 1.,
-    sandbox_opening: &[(GreenSlime, 275.), (IronBoar, 350.), (Shield, 423.)],
+    sandbox_opening: &[GreenSlime, IronBoar, Shield],
     sandbox_reinforcements: Some(group(
         600,
         128,
