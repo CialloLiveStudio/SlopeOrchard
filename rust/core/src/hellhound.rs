@@ -1,20 +1,36 @@
+use std::collections::VecDeque;
+
 use crate::{
-    ground, Body, FruitKind, MonsterKind, Orchard, Point, Stage, VfxEvent, CHIEF_X, DT, SLOPE,
+    ground, Body, FruitKind, MonsterKind, Orchard, Point, Stage, TameFightDef, VfxEvent, CHIEF_X,
+    DT, SLOPE,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub enum HellhoundState {
-    Wild { remaining: u8, max: u8 },
+    Wild,
     Tamed,
     Patrolling,
     Charging,
     Dizzy { ticks_left: u32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WildAction {
+    Climbing,
+    Panting,
+    Munching,
+    Dizzy,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Hellhound {
     pub pos: Point,
     pub state: HellhoundState,
+    pub tame_progress: u8,
+    pub tame_max: u8,
+    pub wild_action: WildAction,
+    pub wild_pause_ticks: u32,
+    wild_stride_ticks: u32,
     pub stamina: u8,
     pub facing_right: bool,
     cooldown: u32,
@@ -28,13 +44,15 @@ enum ChargeTarget {
 }
 
 impl Hellhound {
-    pub(crate) fn wild(pos: Point, resolve: u8) -> Self {
+    pub(crate) fn wild(pos: Point) -> Self {
         Self {
             pos,
-            state: HellhoundState::Wild {
-                remaining: resolve,
-                max: resolve,
-            },
+            state: HellhoundState::Wild,
+            tame_progress: 0,
+            tame_max: 100,
+            wild_action: WildAction::Climbing,
+            wild_pause_ticks: 0,
+            wild_stride_ticks: 0,
             stamina: 0,
             facing_right: false,
             cooldown: 0,
@@ -46,11 +64,37 @@ impl Hellhound {
         Self {
             pos: Self::on_slope(CHIEF_X + 26.),
             state: HellhoundState::Patrolling,
+            tame_progress: 0,
+            tame_max: 0,
+            wild_action: WildAction::Climbing,
+            wild_pause_ticks: 0,
+            wild_stride_ticks: 0,
             stamina,
             facing_right: true,
             cooldown: 0,
             charge: None,
         }
+    }
+
+    pub(crate) fn advance_wild(
+        &mut self,
+        config: TameFightDef,
+        events: &mut VecDeque<VfxEvent>,
+    ) -> f32 {
+        if self.wild_pause_ticks > 0 {
+            self.wild_pause_ticks -= 1;
+            return 0.;
+        }
+        if self.wild_stride_ticks == config.stride_ticks {
+            self.wild_stride_ticks = 0;
+            self.wild_action = WildAction::Panting;
+            self.wild_pause_ticks = config.pant_ticks - 1;
+            events.push_back(VfxEvent::WildPant(self.pos));
+            return 0.;
+        }
+        self.wild_action = WildAction::Climbing;
+        self.wild_stride_ticks += 1;
+        config.climb_speed
     }
 
     fn on_slope(x: f32) -> Point {
@@ -59,32 +103,51 @@ impl Hellhound {
 }
 
 impl Orchard {
-    pub(crate) fn tame_hit(&mut self, body: &Body, pos: Point, damage: u8) {
-        let Some(config) = self.level.tame_fight else {
+    pub(crate) fn tame_hit(&mut self, index: usize, body: &Body) {
+        let dog = self.hellhound.as_mut().unwrap();
+        let monster = &mut self.monsters[index];
+        let pos = monster.pos;
+        if body.kind != FruitKind::RedApple && body.stage != Stage::Small {
             return;
+        }
+        let progress = match (body.stage, body.home_run) {
+            (Stage::Small, _) => {
+                self.events.push_back(VfxEvent::WildSour(pos));
+                3
+            }
+            (stage, true) => {
+                monster.knockback = 205.;
+                dog.wild_action = WildAction::Dizzy;
+                dog.wild_pause_ticks = 54;
+                self.events.push_back(VfxEvent::WildDizzy(pos, stage));
+                if stage == Stage::Giant {
+                    60
+                } else {
+                    35
+                }
+            }
+            (stage, false) => {
+                dog.wild_action = WildAction::Munching;
+                dog.wild_pause_ticks = 132;
+                self.events.push_back(VfxEvent::WildMunch(pos, stage));
+                if stage == Stage::Giant {
+                    monster.knockback = 48.;
+                    50
+                } else {
+                    monster.knockback = 0.;
+                    25
+                }
+            }
         };
-        let Some(dog) = self.hellhound.as_mut() else {
-            return;
-        };
-        let HellhoundState::Wild { remaining, max } = dog.state else {
-            return;
-        };
-        let progress = damage
-            + if body.kind == FruitKind::RedApple {
-                config.apple_bonus
-            } else {
-                0
-            };
-        let remaining = remaining.saturating_sub(progress);
+        dog.tame_progress = dog.tame_progress.saturating_add(progress).min(dog.tame_max);
         self.events
-            .push_back(VfxEvent::TameProgress(pos, remaining, max));
-        dog.pos = pos;
-        if remaining == 0 {
+            .push_back(VfxEvent::TameProgress(pos, dog.tame_progress, dog.tame_max));
+        if dog.tame_progress == dog.tame_max {
             dog.state = HellhoundState::Tamed;
+            dog.wild_pause_ticks = 0;
             self.companion_unlocked = true;
+            self.phase = crate::Phase::Victory;
             self.events.push_back(VfxEvent::Tamed(pos));
-        } else {
-            dog.state = HellhoundState::Wild { remaining, max };
         }
     }
 

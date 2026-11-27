@@ -59,14 +59,14 @@ fn hellhound_snapshot(orchard: &Orchard) -> Value {
         return json!({"present": false, "sandbox_enabled": sandbox_enabled});
     };
     let (mode, state, wild_hp, wild_max_hp, nap_ticks_left) = match dog.state {
-        HellhoundState::Wild { remaining, max } => ("wild", "wild", remaining, max, 0),
-        HellhoundState::Tamed => (
-            "companion",
-            "tamed",
-            0,
-            orchard.level().tame_fight.map_or(0, |fight| fight.resolve),
+        HellhoundState::Wild => (
+            "wild",
+            "wild",
+            dog.tame_max - dog.tame_progress,
+            dog.tame_max,
             0,
         ),
+        HellhoundState::Tamed => ("companion", "tamed", 0, dog.tame_max, 0),
         HellhoundState::Patrolling => ("companion", "patrol", 0, 0, 0),
         HellhoundState::Charging => ("companion", "charge", 0, 0, 0),
         HellhoundState::Dizzy { ticks_left } => ("companion", "nap", 0, 0, ticks_left),
@@ -76,7 +76,7 @@ fn hellhound_snapshot(orchard: &Orchard) -> Value {
         "present": true, "sandbox_enabled": sandbox_enabled,
         "mode": mode, "state": state, "pos": point(dog.pos), "facing_right": dog.facing_right,
         "stamina": dog.stamina, "max_stamina": config.map_or(0, |companion| companion.stamina),
-        "wild_hp": wild_hp, "wild_max_hp": wild_max_hp, "tame_progress": wild_max_hp - wild_hp,
+        "wild_hp": wild_hp, "wild_max_hp": wild_max_hp, "tame_progress": dog.tame_progress, "tame_max": dog.tame_max,
         "nap_ticks_left": nap_ticks_left, "nap_seconds_left": nap_ticks_left as f32 * DT,
         "nap_seconds_total": config.map_or(0., |companion| companion.nap_ticks as f32 * DT),
     })
@@ -220,7 +220,7 @@ impl OrchardBridge {
             .map(|monster| {
                 json!({
                     "id": monster.id, "kind": monster.kind as u8, "hp": monster.hp,
-                    "max_hp": monster.kind.hp(), "pos": point(monster.pos),
+                    "max_hp": monster.kind.hp(), "lid_hp": monster.lid_hp, "pos": point(monster.pos),
                 })
             })
             .collect();
@@ -292,6 +292,8 @@ impl OrchardBridge {
                 VfxEvent::HomeRunDash { from, target } => {
                     json!(["home_run", point(target), point(from)])
                 }
+                VfxEvent::ShieldLidDent(pos, hp) => json!(["shield_lid_dent", point(pos), hp]),
+                VfxEvent::ShieldLidBreak(pos) => json!(["shield_lid_break", point(pos)]),
                 VfxEvent::ShieldRebound(pos) => json!(["shield", point(pos)]),
                 VfxEvent::MelonCombo {
                     pos,
@@ -300,9 +302,13 @@ impl OrchardBridge {
                 } => {
                     json!(["combo_bounces", point(pos), combo_bounces, monster_hit])
                 }
-                VfxEvent::TameProgress(pos, remaining, max) => {
-                    json!(["tame_progress", point(pos), remaining, max])
+                VfxEvent::TameProgress(pos, progress, max) => {
+                    json!(["tame_progress", point(pos), max - progress, max])
                 }
+                VfxEvent::WildPant(pos) => json!(["wild_pant", point(pos)]),
+                VfxEvent::WildMunch(pos, stage) => json!(["wild_munch", point(pos), stage as u8]),
+                VfxEvent::WildDizzy(pos, stage) => json!(["wild_dizzy", point(pos), stage as u8]),
+                VfxEvent::WildSour(pos) => json!(["wild_sour", point(pos)]),
                 VfxEvent::Tamed(pos) => json!(["tamed", point(pos)]),
                 VfxEvent::HellhoundCharge(pos) => json!(["hellhound_charge", point(pos)]),
                 VfxEvent::HellhoundHit(pos, damage) => json!(["hellhound_hit", point(pos), damage]),

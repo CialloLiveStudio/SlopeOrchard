@@ -45,17 +45,36 @@ const BOAR := [
 	"........................", "........................", "........................", "........................",
 ]
 const SHIELD := [
-	"...OOOOOOOOOOOOOO...", "..OHYYYYHHHYYYYYDO..", ".OHYYYYYYYYYYYYYYDO.",
-	".OYYYYYYYYYYDDDDDDO.", "..ODDDDDDDDDDDDDOO..", "....OOOVVVVOOOO.....",
+	"....................", "....................", "....................",
+	"......OOOOOOO.......", ".....OVVVVVVVO......", "....OOOVVVVOOOO.....",
 	".....OVVVVVVVO......", "....OVWVOVVVO.......", "....OVVVVVVVVO......",
 	"....OOVVVVVVOO......", "...OOVBBVBBVOOO.....", "...OVBBBBBBBVO......",
 	"...OOVBBBBBOOO......", ".....OBBBOOKO.......", "....OKKOOOKKO.......",
 	"....OOOO.OOOO.......",
 ]
 const SHIELD_PALETTE := {
-	"O": "#422f3f", "H": "#fff3ba", "Y": "#ffc965",
-	"D": "#cc7d40", "V": "#9b777e", "W": "#fff9d6", "B": "#657985", "K": "#4d495b",
+	"O": "#422f3f", "V": "#9b777e", "W": "#fff9d6", "B": "#657985", "K": "#4d495b",
 }
+const POT_LIDS := [
+	[
+		".........OOO........", "...OOOOOOHDDOOOOO...",
+		"..OHYYYYHHHYYYYYDO..", ".OHYYYYYYYYYYYYYYDO.",
+		".OYYYYYYYYYYDDDDDDO.", "..ODDDDDDDDDDDDDOO..",
+	],
+	[
+		".........OOO........", "...OOOOOOHDODDOOO...",
+		"..OHYYYYHHHODDYYDO..", ".OHYYYYYYYYDYYYYYDO.",
+		".OYYYYYYYYDDDDDDDO.", "..ODDDDDDDDDDDDDOO..",
+	],
+	[
+		"........OOO.........", "...OOOOOHDODO....O..",
+		"..OHYYYYHDOODOOOODO.", ".OHYYYYYDOODYYYYDDO.",
+		".OYYYYYYDDDDDDDDDO.", "..ODDDDDDDDDDDDDOO..",
+	],
+]
+const LID_PALETTE := {"O": "#422f3f", "H": "#fff3ba", "Y": "#ffc965", "D": "#b66c3f"}
+const SWEAT := ["..O..", ".OHO.", ".OHBO", "OHBBO", ".OOO."]
+const SWEAT_PALETTE := {"O": "#376584", "H": "#e5faff", "B": "#7bdaed"}
 const CHIEF := [
 	".......OOO..........", "......OYYYO.........", ".....OYYYYDO........",
 	"...OOYYYYYYDO.......", "..OHHHHHHHDDDDO.....", "...OOOSSSSOOO.......",
@@ -135,7 +154,8 @@ static func hellhound(pose: String, frame: int = 0) -> ImageTexture:
 	else:
 		var charging := pose == "charge"
 		var y := 9 if charging else 7
-		var stride := -2 if frame % 2 == 0 else 2
+		var walking := pose in ["patrol", "charge"]
+		var stride := (-2 if frame == 0 else 2) if walking else 0
 		box(bitmap, 0, y + 1, 4, 2, HOUND_PALETTE.O)
 		box(bitmap, 2, y + 2, 4, 3, HOUND_PALETTE.O)
 		box(bitmap, 4, y + 3, 7, 3, HOUND_PALETTE.O)
@@ -143,11 +163,24 @@ static func hellhound(pose: String, frame: int = 0) -> ImageTexture:
 		for i in 4:
 			var leg_x := 10 + i * 2 if i < 2 else 16 + i * 2
 			var foot_x := leg_x + (stride if i % 2 == 0 else -stride)
-			var foot_y := 17 if charging or i % 2 == frame % 2 else 16
+			var foot_y := 16 if pose == "patrol" and i % 2 != frame else 17
 			box(bitmap, leg_x, y + 6, 2, foot_y - y - 4, HOUND_PALETTE.O)
 			box(bitmap, mini(leg_x, foot_x), foot_y, absi(leg_x - foot_x) + 2, 2, HOUND_PALETTE.O)
 			box(bitmap, foot_x, foot_y + 1, 2, 1, HOUND_PALETTE.H if i % 2 == 0 else HOUND_PALETTE.B)
 		_pixels(bitmap, HELLHOUND, HOUND_PALETTE, Vector2i(6 if charging else 5, y))
+		match pose:
+			"munch":
+				box(bitmap, 21, y + 4, 3, 1, HOUND_PALETTE.O)
+				box(bitmap, 24, y + 5, 2, 1, "#f397ad")
+				box(bitmap, 24, y + 7, 3, 1 + frame, HOUND_PALETTE.O)
+				if frame == 1:
+					box(bitmap, 25, y + 8, 1, 1, "#f397ad")
+			"pant":
+				box(bitmap, 24, y + 7, 3, 1, HOUND_PALETTE.O)
+				box(bitmap, 25, y + 8, 2, 1 + frame, "#d77791")
+			"sour":
+				box(bitmap, 21, y + 4, 3, 1, HOUND_PALETTE.O)
+				box(bitmap, 24, y + 7, 3, 1, "#c8d079")
 	return ImageTexture.create_from_image(bitmap)
 
 static func scenery(slots: Array) -> ImageTexture:

@@ -12,6 +12,7 @@ pub enum LevelId {
 
 #[derive(Debug, Clone, Copy)]
 pub struct SpawnGroup {
+    pub spawn_x: f32,
     pub first_tick: u32,
     pub interval: u32,
     pub jitter: u32,
@@ -21,16 +22,15 @@ pub struct SpawnGroup {
 
 #[derive(Debug, Clone, Copy)]
 pub struct WaveDef {
-    pub unlocked_slots: usize,
     pub new_plants: &'static [FruitKind],
     pub spawns: &'static [SpawnGroup],
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct TameFightDef {
-    pub resolve: u8,
-    pub apple_bonus: u8,
-    pub charge_speed: f32,
+    pub climb_speed: f32,
+    pub stride_ticks: u32,
+    pub pant_ticks: u32,
     pub retreat_x: f32,
 }
 
@@ -51,8 +51,7 @@ pub struct CompanionDef {
 pub struct LevelDef {
     pub id: LevelId,
     pub display_name: &'static str,
-    pub initial_unlocked_slots: usize,
-    pub initial_plants: &'static [FruitKind],
+    pub initial_plants: &'static [(usize, FruitKind)],
     pub available_plants: &'static [FruitKind],
     pub initial_chime_slot: Option<usize>,
     pub companion_enabled: bool,
@@ -92,6 +91,7 @@ const fn group(
     pattern: &'static [MonsterKind],
 ) -> SpawnGroup {
     SpawnGroup {
+        spawn_x: crate::SPAWN_X,
         first_tick,
         interval,
         jitter,
@@ -115,25 +115,21 @@ const COMPANION: CompanionDef = CompanionDef {
 static T1: LevelDef = LevelDef {
     id: LevelId::T1,
     display_name: "初遇黑狼",
-    initial_unlocked_slots: 2,
-    initial_plants: &[RedApple, RedApple],
+    initial_plants: &[(0, RedApple), (2, RedApple), (4, RedApple), (5, RedApple)],
     available_plants: &[RedApple],
     initial_chime_slot: None,
     companion_enabled: false,
     companion: None,
     waves: &[
         WaveDef {
-            unlocked_slots: 2,
             new_plants: &[],
             spawns: &[group(120, 386, 35, 5, &[GreenSlime])],
         },
         WaveDef {
-            unlocked_slots: 2,
             new_plants: &[],
-            spawns: &[group(100, 284, 48, 7, &[GreenSlime])],
+            spawns: &[group(100, 305, 48, 7, &[GreenSlime])],
         },
         WaveDef {
-            unlocked_slots: 2,
             new_plants: &[],
             spawns: &[
                 group(100, 270, 30, 4, &[GreenSlime]),
@@ -142,9 +138,9 @@ static T1: LevelDef = LevelDef {
         },
     ],
     tame_fight: Some(TameFightDef {
-        resolve: 16,
-        apple_bonus: 2,
-        charge_speed: 43.,
+        climb_speed: 16.,
+        stride_ticks: 288,
+        pant_ticks: 72,
         retreat_x: 310.,
     }),
     rolling_friction: 1.,
@@ -157,44 +153,46 @@ static T1: LevelDef = LevelDef {
 static T2: LevelDef = LevelDef {
     id: LevelId::T2,
     display_name: "节奏压测",
-    initial_unlocked_slots: 3,
-    initial_plants: &[RedApple, BounceMelon, BowlingPumpkin],
+    initial_plants: &[
+        (0, RedApple),
+        (2, BounceMelon),
+        (4, BowlingPumpkin),
+        (5, RedApple),
+    ],
     available_plants: &[RedApple, BounceMelon, BowlingPumpkin],
     initial_chime_slot: None,
     companion_enabled: true,
     companion: Some(COMPANION),
     waves: &[
         WaveDef {
-            unlocked_slots: 3,
             new_plants: &[],
-            spawns: &[group(
-                100,
-                229,
-                60,
-                9,
-                &[GreenSlime, IronBoar, Shield, GreenSlime],
-            )],
+            spawns: &[
+                // A nearby opening pack rewards fast-growing fruit before the main wave arrives.
+                SpawnGroup {
+                    spawn_x: 185.,
+                    ..group(0, 78, 100, 6, &[GreenSlime])
+                },
+                group(100, 229, 60, 9, &[GreenSlime, IronBoar, Shield, GreenSlime]),
+            ],
         },
         WaveDef {
-            unlocked_slots: 4,
             new_plants: &[BounceMelon],
             spawns: &[group(
                 90,
-                221,
-                50,
+                240,
+                72,
                 13,
                 &[Shield, GreenSlime, IronBoar, Shield, GreenSlime],
             )],
         },
         WaveDef {
-            unlocked_slots: 4,
             new_plants: &[],
             spawns: &[group(
                 70,
-                198,
-                44,
-                16,
-                &[GreenSlime, Shield, IronBoar, GreenSlime, Shield, IronBoar],
+                167,
+                105,
+                22,
+                &[IronBoar, Shield, IronBoar, GreenSlime, IronBoar],
             )],
         },
     ],
@@ -209,13 +207,12 @@ static T2: LevelDef = LevelDef {
 static SANDBOX: LevelDef = LevelDef {
     id: LevelId::Sandbox,
     display_name: "满配沙盒",
-    initial_unlocked_slots: 6,
     initial_plants: &[
-        RedApple,
-        BounceMelon,
-        BowlingPumpkin,
-        RedApple,
-        BowlingPumpkin,
+        (0, RedApple),
+        (1, BounceMelon),
+        (2, BowlingPumpkin),
+        (4, RedApple),
+        (5, BowlingPumpkin),
     ],
     available_plants: &[RedApple, BounceMelon, BowlingPumpkin],
     initial_chime_slot: Some(3),

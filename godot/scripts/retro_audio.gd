@@ -22,7 +22,10 @@ func _ready() -> void:
 		"heal": _sample(0.26, 480.0, 1120.0, 0.0),
 		"bonk": _sample(0.15, 650.0, 210.0, 0.05),
 		"home_run": _sample(0.095, 850.0, 125.0, 0.57),
-		"shield": _sample(0.23, 230.0, 810.0, 0.06),
+		"shield_lid_dent": _sample(0.27, 510.0, 505.0, 0.07, true),
+		"shield_lid_break": _sample(0.46, 835.0, 245.0, 0.22, true),
+		"munch": _sample(0.13, 420.0, 260.0, 0.28),
+		"sour": _sample(0.19, 540.0, 180.0, 0.09),
 		"charge": _sample(0.10, 170.0, 100.0, 0.25),
 	}
 	for i in 8:
@@ -43,7 +46,7 @@ func play(key: String, pitch := 1.0) -> void:
 	player.pitch_scale = pitch
 	player.play()
 
-func _sample(duration: float, first: float, last: float, grain: float) -> AudioStreamWAV:
+func _sample(duration: float, first: float, last: float, grain: float, metallic := false) -> AudioStreamWAV:
 	var frames := int(duration * RATE)
 	var data := PackedByteArray()
 	data.resize(frames * 2)
@@ -55,6 +58,8 @@ func _sample(duration: float, first: float, last: float, grain: float) -> AudioS
 		phase += lerpf(first, last, progress) * TAU / RATE
 		var envelope := minf(1.0, progress * 80.0) * pow(1.0 - progress, 2.6)
 		var tone := sin(phase) * 0.73 + signf(sin(phase * 2.0)) * 0.23
+		if metallic:
+			tone = sin(phase) * 0.42 + sin(phase * 2.76) * 0.32 + sin(phase * 4.07) * 0.21
 		var signal_value := lerpf(tone, rng.randf_range(-1.0, 1.0), grain)
 		data.encode_s16(i * 2, int(signal_value * envelope * 26000.0))
 	var stream := AudioStreamWAV.new()

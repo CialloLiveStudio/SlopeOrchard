@@ -12,6 +12,7 @@ const RESERVE_STEP := 21
 const INK := Color("#202b3e")
 const PAPER := Color("#fff4d9")
 const GOLD := Color("#ffcd72")
+const PINK := Color("#ff82b7")
 const FRUIT_COLORS := [Color("#f4504f"), Color("#a2d45d"), Color("#ffad47")]
 const GREEN := Color("#c6eb82")
 const SLASH := Color("#ffd27e")
@@ -33,11 +34,14 @@ var green_fruits: Array[ImageTexture] = []
 var fruit_flashes: Array[ImageTexture] = []
 var monsters: Array[ImageTexture] = []
 var monster_flashes: Array[ImageTexture] = []
+var shield_lids: Array[ImageTexture] = []
 var hound_frames := {}
 var bell: ImageTexture
 var chief: ImageTexture
 var chief_flash: ImageTexture
 var hearts: Array[ImageTexture] = []
+var pink_heart: ImageTexture
+var sweat: ImageTexture
 var audio: Node
 var world: Node2D
 var hud: Control
@@ -65,6 +69,7 @@ var effects: Array[Dictionary] = []
 var dash: Dictionary = {}
 var current_phase := -1
 var hound_charge_until := 0.0
+var wild_reaction := {}
 var chief_bonk_until := 0.0
 
 func _ready() -> void:
@@ -85,7 +90,9 @@ func _ready() -> void:
 		Art.sprite(Art.SHIELD, Art.SHIELD_PALETTE)])
 	monster_flashes.assign([Art.sprite(Art.SLIME, slime_colors, true), Art.sprite(Art.BOAR, boar_colors, true),
 		Art.sprite(Art.SHIELD, Art.SHIELD_PALETTE, true)])
-	for pose in ["patrol", "charge", "tamed", "nap"]:
+	for lid in Art.POT_LIDS:
+		shield_lids.append(Art.sprite(lid, Art.LID_PALETTE))
+	for pose in ["patrol", "charge", "tamed", "nap", "pant", "munch", "dizzy", "sour"]:
 		hound_frames[pose] = [Art.hellhound(pose, 0), Art.hellhound(pose, 1)]
 	bell = Art.sprite(Art.BELL, {"O": "#624238", "G": "#ffd86c", "P": "#f2af53", "D": "#ca7e43", "H": "#fff1ac"})
 	chief = Art.sprite(Art.CHIEF, Art.CHIEF_PALETTE)
@@ -94,6 +101,8 @@ func _ready() -> void:
 		Art.sprite(Art.HEART, {"O": "#612e40", "R": "#ff625a", "H": "#ffb17a"}),
 		Art.sprite(Art.HEART, {"O": "#141e30", "R": "#41516a", "H": "#50617a"}),
 	])
+	pink_heart = Art.sprite(Art.HEART, {"O": "#692f55", "R": "#ff82b7", "H": "#ffe0ed"})
+	sweat = Art.sprite(Art.SWEAT, Art.SWEAT_PALETTE)
 	world = Node2D.new()
 	world.draw.connect(_paint_world)
 	add_child(world)
@@ -171,6 +180,7 @@ func _reset_presentation() -> void:
 	hitstop = 0
 	shake = 0
 	hound_charge_until = 0
+	wild_reaction.clear()
 	chief_bonk_until = 0
 	world.position = Vector2.ZERO
 	effects.clear()
@@ -326,9 +336,9 @@ func _tray_index(point: Vector2, allow_empty: bool) -> int:
 	return index + slot_x.size() if index >= 0 and index < limit else -1
 
 func _begin_drag(button: int, shift: bool) -> bool:
-	if model.phase not in [INTERMISSION, SANDBOX]:
+	if model.phase not in [WAVE, INTERMISSION, SANDBOX]:
 		return false
-	if model.phase == SANDBOX and button != MOUSE_BUTTON_RIGHT and not shift:
+	if model.phase != INTERMISSION and button != MOUSE_BUTTON_RIGHT and not shift:
 		return false
 	var index := _slot_near(mouse, 19)
 	if index < 0:
@@ -361,10 +371,13 @@ func _stop_drag() -> void:
 func _fruit_center(index: int) -> Vector2:
 	return _vec(model.slot_geometry[index].fruit_center)
 
+func _drop_guide(index: int) -> Vector2:
+	return Vector2(slot_x[index], model.trellis_y)
+
 func _focused_fruit() -> int:
 	var closest := -1
 	var distance := INF
-	for i in int(model.unlocked_slots):
+	for i in slot_x.size():
 		var radius = model.slot_geometry[i].cut_radius
 		var offset := (mouse - world.position).distance_to(_fruit_center(i))
 		if radius != null and offset <= radius and offset < distance:
@@ -457,21 +470,15 @@ func _paint_world() -> void:
 	var active: bool = model.phase in [WAVE, SANDBOX]
 	var focus := _focused_fruit() if active and dragged_item < 0 else -1
 	if focus >= 0:
-		var center := _fruit_center(focus)
-		var x := roundf(center.x)
+		var origin := _drop_guide(focus)
+		var x := origin.x
 		var floor_y := roundi(_ground(x))
-		for y in range(roundi(center.y) + 9, floor_y, 6):
+		for y in range(roundi(origin.y), floor_y, 6):
 			world.draw_rect(Rect2(x, y, 1, mini(3, floor_y - y)), Color("#ffffff88"))
 		world.draw_rect(Rect2(x - 4, floor_y, 9, 1), Color("#fff8caaa"))
 	for i in slot_x.size():
 		var x: float = slot_x[i]
 		var item = model.slots[i]
-		if i >= model.unlocked_slots:
-			world.draw_rect(Rect2(x - 10, 55, 21, 18), Color("#46586488"))
-			for dx in [-8, -3, 2, 7]:
-				world.draw_rect(Rect2(x + dx, 58, 2, 13), Color("#536373"))
-			world.draw_rect(Rect2(x - 9, 62, 19, 2), Color("#677989"))
-			continue
 		if dragged_item >= 0:
 			world.draw_rect(Rect2(_fruit_center(i).round() - Vector2(10, 8), Vector2(21, 20)), Color("#fff0a9c8"), false)
 		if item == null:
@@ -523,6 +530,11 @@ func _paint_world() -> void:
 		var texture := monster_flashes[int(enemy.kind)] if struck else monsters[int(enemy.kind)]
 		var offset := -1 if enemy.kind == 2 else (2 if enemy.kind == 0 else 3)
 		_stamp(texture, pos + Vector2(0, offset), squash)
+		var lid := _shield_lid(int(enemy.lid_hp))
+		if lid != null:
+			world.draw_set_transform((pos + Vector2(0, -7)).round(), (3 - enemy.lid_hp) * 0.19)
+			_stamp(lid, Vector2.ZERO)
+			world.draw_set_transform(Vector2.ZERO)
 		var width := 12 if enemy.kind == 0 else 16
 		var bar := (pos + Vector2(-width / 2.0, -10 if enemy.kind == 0 else -14)).round()
 		world.draw_rect(Rect2(bar, Vector2(width, 3)), INK)
@@ -543,9 +555,22 @@ func _paint_world() -> void:
 		var pos: Vector2 = effect.pos
 		if effect.has("hearts"):
 			var time := 1.0 - age / float(effect.hearts)
+			var texture: Texture2D = effect.get("heart_texture", hearts[0])
 			for i in 3:
-				var rise := Vector2((i - 1) * (6 + 10 * time), -8 - 29 * time + (i % 2) * 6)
-				_stamp(hearts[0], pos + rise, Vector2.ONE * 0.65, Color(1, 1, 1, clampf(age * 4, 0, 1)))
+				var rise := Vector2((i - 1) * (6 + 10 * time), -17 - 29 * time + (i % 2) * 6)
+				_stamp(texture, pos + rise, Vector2.ONE * float(effect.get("heart_scale", 0.65)),
+					Color(1, 1, 1, clampf(age * 4, 0, 1)))
+		elif effect.has("sweat"):
+			var time := 1.0 - age / float(effect.sweat)
+			for i in 3:
+				var offset := Vector2((i - 1) * (7 + 14 * time), -5 - 42 * time + 50 * time * time)
+				_stamp(sweat, pos + offset, Vector2.ONE, Color(1, 1, 1, clampf(age * 5, 0, 1)))
+		elif effect.has("lid"):
+			var time := elapsed - float(effect.started)
+			var offset := Vector2(145 * time, -210 * time + 270 * time * time) * Vector2(effect.direction, 1)
+			world.draw_set_transform((pos + offset).round(), effect.direction * time * TAU * 2.5)
+			_stamp(effect.lid, Vector2.ZERO)
+			world.draw_set_transform(Vector2.ZERO)
 		elif effect.has("text"):
 			var at := (pos + Vector2(-3, -25 + age * 26)).round()
 			var color: Color = effect.get("color", GOLD if effect.giant else PAPER)
@@ -576,32 +601,59 @@ func _paint_world() -> void:
 func _vec(pair: Array) -> Vector2:
 	return Vector2(pair[0], pair[1])
 
+func _shield_lid(hp: int) -> Texture2D:
+	return shield_lids[3 - hp] if hp > 0 else null
+
+func _tame_fraction(dog: Dictionary) -> float:
+	return clampf(float(dog.tame_progress) / maxf(1.0, dog.tame_max), 0.0, 1.0)
+
+func _paint_tame_bar(dog: Dictionary, pos: Vector2) -> void:
+	var fraction := _tame_fraction(dog)
+	var bar := Vector2(clampf(pos.x - 24, 1, 429), pos.y - 24).round()
+	world.draw_rect(Rect2(bar, Vector2(50, 13)), INK)
+	_stamp(pink_heart, bar + Vector2(6, 6), Vector2.ONE * 0.66)
+	world.draw_rect(Rect2(bar + Vector2(12, 5), Vector2(17, 3)), Color("#6a3d60"))
+	world.draw_rect(Rect2(bar + Vector2(12, 5), Vector2(roundf(17 * fraction), 3)), PINK)
+	world.draw_string(FONT, bar + Vector2(31, 9), "%d%%" % roundi(fraction * 100),
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 8, PAPER)
+
 func _paint_hellhound(dog: Dictionary) -> void:
 	var pos := _vec(dog.pos)
 	var pose: String = dog.state
+	var reaction_age := 0.0
 	if pose == "wild":
 		pose = "patrol"
+		if not wild_reaction.is_empty() and elapsed < wild_reaction.until:
+			pose = wild_reaction.pose
+			reaction_age = elapsed - float(wild_reaction.started)
 	elif pose == "patrol" and elapsed < hound_charge_until:
 		pose = "charge"
 	var direction := 1.0 if dog.facing_right else -1.0
 	var frame := floori(elapsed * (22 if pose == "charge" else 9)) % 2
 	var center := (pos + Vector2(0, 2)).round()
+	var tilt := 0.0
+	match pose:
+		"munch", "pant":
+			center.y += frame
+		"dizzy":
+			center.x -= direction * 8.0 * maxf(0.0, 1.0 - reaction_age / 0.18)
+			tilt = -direction * sin(reaction_age * 22.0) * 0.22
+			_orbit_stars(center - Vector2(0, 9), 10.0)
+		"sour":
+			center.x += roundf(sin(reaction_age * 70.0) * 2.0)
+			tilt = sin(reaction_age * 70.0) * 0.16
 	if pose == "charge":
 		center.x += direction * 3
 		for i in 3:
 			var streak := center + Vector2(-direction * (16 + i * 3), i * 3)
 			world.draw_line(streak, streak - Vector2(direction * 7, 0), PAPER)
-	world.draw_set_transform(center, 0.0, Vector2(direction, 1.0))
+	world.draw_set_transform(center, tilt, Vector2(direction, 1.0))
 	_stamp(hound_frames[pose][frame], Vector2.ZERO)
 	world.draw_set_transform(Vector2.ZERO)
 	if dog.mode == "wild":
-		var bar := Vector2(clampf(pos.x - 17, 1, 445), pos.y - 12).round()
-		world.draw_rect(Rect2(bar, Vector2(34, 15)), INK)
-		world.draw_string(FONT, bar + Vector2(7, 9), "驯服", HORIZONTAL_ALIGNMENT_LEFT, -1, 9, PAPER)
-		world.draw_rect(Rect2(bar + Vector2(2, 11), Vector2(30, 2)), Color("#aa544c"))
-		world.draw_rect(Rect2(bar + Vector2(2, 11),
-			Vector2(roundf(30.0 * dog.tame_progress / dog.wild_max_hp), 2)), GOLD)
+		_paint_tame_bar(dog, pos)
 	elif pose == "tamed":
+		_paint_tame_bar(dog, pos)
 		var words := "小黑加入果园！"
 		var width := FONT.get_string_size(words, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
 		var x := roundf((480 - width) / 2)
@@ -757,13 +809,36 @@ func _effect(event: Array, combo_hit := false) -> void:
 			audio.play("home_run")
 		"shield":
 			effects.append({"pos": pos, "until": elapsed + 0.24, "color": Color("#fff1ba")})
-			_debris(pos, GOLD, 10)
-			audio.play("shield")
-		"tame_progress":
+		"shield_lid_dent":
 			_debris(pos, GOLD, 8)
-			audio.play("hit")
+			audio.play("shield_lid_dent", 0.84 + float(event[2]) * 0.08)
+		"shield_lid_break":
+			var direction := 1.0 if pos.x >= 240 else -1.0
+			effects.append({"pos": pos, "started": elapsed, "until": elapsed + 1.4,
+				"lid": _shield_lid(1), "direction": direction})
+			_debris(pos, PAPER, 12)
+			audio.play("shield_lid_break")
+		"tame_progress":
+			_debris(pos, PINK, 5)
+		"wild_pant":
+			_set_wild_reaction("pant", 0.60)
+		"wild_munch":
+			var giant: bool = event[2] == 2
+			_set_wild_reaction("munch", 1.10)
+			effects.append({"pos": pos, "until": elapsed + 1.10, "hearts": 1.10,
+				"heart_texture": pink_heart, "heart_scale": 1.25 if giant else 0.72})
+			audio.play("munch", 0.8 if giant else 1.0)
+		"wild_dizzy":
+			_set_wild_reaction("dizzy", 0.45)
+			audio.play("bonk")
+		"wild_sour":
+			_set_wild_reaction("sour", 0.36)
+			effects.append({"pos": pos, "until": elapsed + 0.48, "sweat": 0.48})
+			audio.play("sour")
 		"tamed", "hellhound_revived":
 			var duration := 0.95 if event[0] == "tamed" else 0.65
+			if event[0] == "tamed":
+				wild_reaction.clear()
 			effects.append({"pos": pos, "until": elapsed + duration, "hearts": duration})
 			_debris(pos - Vector2(0, 8), GOLD, 10)
 			_debris(pos - Vector2(0, 8), PAPER, 6)
@@ -781,6 +856,9 @@ func _effect(event: Array, combo_hit := false) -> void:
 		"hellhound_nap":
 			hound_charge_until = 0.0
 			audio.play("bonk")
+
+func _set_wild_reaction(pose: String, duration: float) -> void:
+	wild_reaction = {"pose": pose, "started": elapsed, "until": elapsed + duration}
 
 func _debris(at: Vector2, color: Color, count: int) -> void:
 	var particles := CPUParticles2D.new()

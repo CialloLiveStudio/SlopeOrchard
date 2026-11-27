@@ -1,7 +1,7 @@
 use crate::{
     ground, CombatContribution, Fruit, FruitKind, LevelId, Monster, MonsterKind, Orchard, Phase,
-    Point, SlotItem, Stage, CHIEF_X, DT, GRAVITY, MAX_CUT_VX, MELON_GRAVITY, SPAWN_X,
-    SWIPE_DROP_SPEED,
+    Point, SlotItem, Stage, CHIEF_X, DT, GRAVITY, MAX_CUT_VX, MELON_GRAVITY, SLOTS, SPAWN_X,
+    SWIPE_DROP_SPEED, TRELLIS_Y,
 };
 use FruitKind::{BounceMelon, BowlingPumpkin, RedApple};
 use MonsterKind::{GreenSlime, IronBoar, Shield, WildHellhound};
@@ -86,6 +86,56 @@ pub struct Outcome {
     pub contributions: [CombatContribution; 4],
 }
 
+/// Guardrails use the unrounded percentages and mean printed in the report.
+pub fn warnings(config: Config, win_rate: f32, hp: f32, shares: [(f32, f32); 4]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    match (config.level, config.strategy) {
+        (LevelId::T1, Strategy::Casual) if win_rate < 92. => {
+            warnings.push(format!("T1 Casual win rate {win_rate:.1}% is below 92%"));
+        }
+        (LevelId::T1, Strategy::Skilled) => {
+            if win_rate < 100. {
+                warnings.push(format!("T1 Skilled win rate {win_rate:.1}% is below 100%"));
+            }
+            if hp < 4. {
+                warnings.push(format!("T1 Skilled avg remaining HP {hp:.2} is below 4.0"));
+            }
+        }
+        (LevelId::T2, Strategy::Casual) if !(45. ..=70.).contains(&win_rate) => {
+            warnings.push(format!(
+                "T2 Casual win rate {win_rate:.1}% is outside 45% to 70%"
+            ));
+        }
+        (LevelId::T2, Strategy::Skilled) if win_rate < 90. => {
+            warnings.push(format!("T2 Skilled win rate {win_rate:.1}% is below 90%"));
+        }
+        (LevelId::T2, Strategy::CheeseAuditor(BowlingPumpkin)) if win_rate > 40. => {
+            warnings.push(format!(
+                "T2 All-Pumpkin win rate {win_rate:.1}% exceeds 40%"
+            ));
+        }
+        _ => {}
+    }
+    if config.level == LevelId::T2 {
+        if shares[3].1 > 35. {
+            warnings.push(format!(
+                "T2 Hellhound kill share {:.1}% exceeds 35%",
+                shares[3].1
+            ));
+        }
+        if !matches!(config.strategy, Strategy::CheeseAuditor(_)) {
+            for (name, (damage, _)) in ["Apple", "Melon", "Pumpkin"].into_iter().zip(shares) {
+                if damage > 70. {
+                    warnings.push(format!(
+                        "T2 mixed {name} damage share {damage:.1}% exceeds 70%"
+                    ));
+                }
+            }
+        }
+    }
+    warnings
+}
+
 struct Player {
     strategy: Strategy,
     random: u64,
@@ -103,8 +153,10 @@ impl Player {
 
     fn apply_loadout(&self, orchard: &mut Orchard) {
         if let Strategy::CheeseAuditor(kind) = self.strategy {
-            for slot in 0..orchard.unlocked_slots {
-                assert!(orchard.equip_plant(slot, kind));
+            for slot in 0..SLOTS.len() {
+                if orchard.slots[slot].is_some() {
+                    assert!(orchard.equip_plant(slot, kind));
+                }
             }
         }
     }
@@ -118,7 +170,7 @@ impl Player {
     }
 
     fn casual(&mut self, orchard: &mut Orchard) {
-        for slot in 0..orchard.unlocked_slots {
+        for slot in 0..SLOTS.len() {
             let Some(SlotItem::Fruit(fruit)) = orchard.slots[slot] else {
                 continue;
             };
@@ -134,7 +186,13 @@ impl Player {
                     delay
                 }
             };
-            if fruit.age >= fruit.kind.mature_ticks() + delay && orchard.cut_fruit(slot) {
+            let ready = fruit.age >= fruit.kind.mature_ticks() + delay;
+            let nearby_threat = fruit.age >= fruit.kind.mature_ticks() + delay / 5
+                && orchard
+                    .monsters
+                    .iter()
+                    .any(|monster| (6. ..=28.).contains(&(monster.pos.x - SLOTS[slot])));
+            if (ready || nearby_threat) && orchard.cut_fruit(slot) {
                 self.casual_delay[slot] = None;
             }
         }
@@ -144,7 +202,8 @@ impl Player {
     }
 
     fn greedy(&self, orchard: &mut Orchard) {
-        for slot in 0..orchard.unlocked_slots {
+        self.try_home_run(orchard, |monster| monster.pos.x <= SLOTS[1]);
+        for slot in 0..SLOTS.len() {
             let Some(SlotItem::Fruit(fruit)) = orchard.slots[slot] else {
                 continue;
             };
@@ -158,9 +217,13 @@ impl Player {
             {
                 orchard.cut_fruit_angled(slot, -MAX_CUT_VX);
             } else {
-                let view = orchard.slot_snapshot(slot);
-                let tangent = orchard.vines[slot].tangent();
-                if shot_value(orchard, fruit, view.fruit_center, tangent) >= 0.9 {
+                if shot_value(
+                    orchard,
+                    fruit,
+                    Point::new(SLOTS[slot], TRELLIS_Y),
+                    Point::default(),
+                ) >= 0.9
+                {
                     orchard.cut_fruit(slot);
                 }
             }
@@ -210,20 +273,19 @@ impl Player {
 
     fn skilled(&self, orchard: &mut Orchard) {
         self.try_home_run(orchard, |monster| {
-            matches!(monster.kind, IronBoar | Shield | WildHellhound) || monster.pos.x <= 108.
+            matches!(monster.kind, IronBoar | Shield | WildHellhound) || monster.pos.x <= SLOTS[1]
         });
         if orchard.monsters.is_empty() {
             return;
         }
-        for slot in 0..orchard.unlocked_slots {
+        for slot in 0..SLOTS.len() {
             let Some(SlotItem::Fruit(fruit)) = orchard.slots[slot] else {
                 continue;
             };
             if fruit.stage() == Stage::Small {
                 continue;
             }
-            let view = orchard.slot_snapshot(slot);
-            let tangent = orchard.vines[slot].tangent();
+            let origin = Point::new(SLOTS[slot], TRELLIS_Y);
             if slot == 0
                 && fruit.kind == RedApple
                 && fruit.stage() == Stage::Giant
@@ -235,11 +297,8 @@ impl Player {
             }
             let mut best = (0., 0.);
             for slash in [0., -MAX_CUT_VX, -15., 15., MAX_CUT_VX] {
-                let velocity = Point::new(
-                    tangent.x + slash,
-                    tangent.y + if slash == 0. { 0. } else { SWIPE_DROP_SPEED },
-                );
-                let score = shot_value(orchard, fruit, view.fruit_center, velocity);
+                let velocity = Point::new(slash, if slash == 0. { 0. } else { SWIPE_DROP_SPEED });
+                let score = shot_value(orchard, fruit, origin, velocity);
                 if score > best.0 {
                     best = (score, slash);
                 }
@@ -252,13 +311,15 @@ impl Player {
 }
 
 fn forecast_x(orchard: &Orchard, monster: &Monster, time: f32) -> f32 {
-    let speed = if monster.kind == WildHellhound {
-        orchard.level().tame_fight.unwrap().charge_speed
+    let climb_time = if monster.kind == WildHellhound {
+        let paused = orchard.hellhound.unwrap().wild_pause_ticks;
+        let moving_time = (time - seconds(paused)).max(0.);
+        moving_time * orchard.level().tame_fight.unwrap().climb_speed
     } else {
-        monster.kind.speed()
+        time * monster.kind.speed()
     };
     let push = (monster.horizontal_speed() + monster.kind.speed()) * time.min(0.26);
-    let x = monster.pos.x - speed * time + push;
+    let x = monster.pos.x - climb_time + push;
     orchard.barricades.iter().fold(x, |x, barrier| {
         let edge = barrier.body().pos.x + barrier.body().radius() + monster.kind.radius();
         if monster.pos.x >= edge {
@@ -297,13 +358,12 @@ fn shot_value(orchard: &Orchard, fruit: Fruit, origin: Point, velocity: Point) -
         if (x - landing).abs() <= 45. {
             crowded += 1.;
         }
-        if distance < radius_sum
-            && (monster.kind != Shield || distance > 8. || fruit.kind == BounceMelon)
-        {
+        if distance < radius_sum {
             let precision = 1. - 0.45 * distance / radius_sum;
             let value = match (fruit.kind, fruit.stage(), monster.kind) {
                 (RedApple, Stage::Giant, IronBoar | WildHellhound) => 3.1,
-                (RedApple, _, Shield) => 1.5,
+                (RedApple, Stage::Mature, Shield) if monster.lid_hp > 0 && distance <= 8. => 1.15,
+                (RedApple, _, Shield) => 2.1,
                 (RedApple, Stage::Mature, GreenSlime) if monster.hp > 2 => 1.4,
                 (BounceMelon, _, Shield) => 2.1,
                 (BounceMelon, _, _) => 1.9,
@@ -317,7 +377,7 @@ fn shot_value(orchard: &Orchard, fruit: Fruit, origin: Point, velocity: Point) -
             if (-3. ..=98.).contains(&gap) {
                 rolling += match monster.kind {
                     GreenSlime => 0.9,
-                    Shield => 0.1,
+                    Shield | IronBoar if fruit.stage() == Stage::Giant => 1.05,
                     _ => 0.65,
                 };
             }
@@ -384,4 +444,40 @@ pub fn run(config: Config, seed: u64) -> Outcome {
 
 pub fn seconds(tick: u32) -> f32 {
     tick as f32 * DT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comfort_guardrails_check_each_boundary_before_rounding() {
+        let check = |level, strategy, wins, hp, shares| {
+            warnings(Config { level, strategy }, wins, hp, shares).len()
+        };
+        let empty = [(0., 0.); 4];
+        assert_eq!(check(LevelId::T1, Strategy::Casual, 92., 0., empty), 0);
+        assert_eq!(check(LevelId::T1, Strategy::Casual, 91.99, 0., empty), 1);
+        assert_eq!(check(LevelId::T1, Strategy::Skilled, 100., 4., empty), 0);
+        assert_eq!(check(LevelId::T1, Strategy::Skilled, 99.99, 3.99, empty), 2);
+
+        for (wins, count) in [(44.99, 1), (45., 0), (70., 0), (70.01, 1)] {
+            assert_eq!(check(LevelId::T2, Strategy::Casual, wins, 0., empty), count);
+        }
+        assert_eq!(check(LevelId::T2, Strategy::Skilled, 90., 0., empty), 0);
+        assert_eq!(check(LevelId::T2, Strategy::Skilled, 89.99, 0., empty), 1);
+
+        let pumpkin = Strategy::CheeseAuditor(BowlingPumpkin);
+        let mut shares = empty;
+        shares[2].0 = 70.;
+        shares[3].1 = 35.;
+        assert_eq!(check(LevelId::T2, pumpkin, 40., 0., shares), 0);
+        assert_eq!(check(LevelId::T2, pumpkin, 40.01, 0., shares), 1);
+        assert_eq!(check(LevelId::T2, Strategy::Greedy, 100., 0., shares), 0);
+        shares[2].0 = 70.01;
+        shares[3].1 = 35.01;
+        assert_eq!(check(LevelId::T2, Strategy::Greedy, 100., 0., shares), 2);
+        assert_eq!(check(LevelId::T2, pumpkin, 40., 0., shares), 1);
+        assert_eq!(check(LevelId::T1, Strategy::Greedy, 100., 0., shares), 0);
+    }
 }

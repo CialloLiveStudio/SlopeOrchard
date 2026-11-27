@@ -1,5 +1,5 @@
-use slope_orchard_core::balance::{run, seconds, Config, Outcome, Strategy, CONFIGS, SEED_COUNT};
-use slope_orchard_core::{FruitKind, LevelId, Phase};
+use slope_orchard_core::balance::{run, seconds, warnings, Config, Outcome, CONFIGS, SEED_COUNT};
+use slope_orchard_core::Phase;
 
 fn percent(part: u32, total: u32) -> f32 {
     100. * part as f32 / total.max(1) as f32
@@ -63,29 +63,8 @@ fn report(config: Config, outcomes: &[Outcome]) {
         columns[3],
     );
 
-    if shares[3].1 > 35. {
-        println!(
-            "   [WARN] Hellhound kill share {:.1}% exceeds 35%",
-            shares[3].1
-        );
-    }
-    if config.level == LevelId::T2 {
-        if !matches!(config.strategy, Strategy::CheeseAuditor(_)) {
-            for (name, (damage, _)) in ["Apple", "Melon", "Pumpkin"].into_iter().zip(shares) {
-                if damage > 70. {
-                    println!("   [WARN] T2 mixed {name} damage share {damage:.1}% exceeds 70%");
-                }
-            }
-        }
-        if config.strategy == Strategy::CheeseAuditor(FruitKind::BowlingPumpkin) && win_rate > 35. {
-            println!("   [WARN] T2 All-Pumpkin win rate {win_rate:.1}% exceeds 35%");
-        }
-        if config.strategy == Strategy::Casual && win_rate > 85. {
-            println!("   [WARN] T2 Casual win rate {win_rate:.1}% exceeds 85%");
-        }
-    }
-    if config.strategy == Strategy::Skilled && win_rate < 85. {
-        println!("   [WARN] Skilled win rate {win_rate:.1}% is below 85%");
+    for warning in warnings(config, win_rate, hp, shares) {
+        println!("   [WARN] {warning}");
     }
     let examples = outcomes
         .iter()
@@ -136,10 +115,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slope_orchard_core::{balance::Strategy, LevelId};
 
     #[test]
     fn balance_sim_smoke() {
-        assert!(SEED_COUNT >= 50);
+        assert!(SEED_COUNT >= 128);
         for level in [LevelId::T1, LevelId::T2] {
             let config = Config {
                 level,
