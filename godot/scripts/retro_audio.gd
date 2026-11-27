@@ -18,6 +18,10 @@ func _ready() -> void:
 		"bounce": _sample(0.19, 155.0, 615.0, 0.02),
 		"ring": _sample(0.34, 1174.0, 1172.0, 0.0),
 		"bowl": _sample(0.29, 105.0, 48.0, 0.61),
+		"heal": _sample(0.26, 480.0, 1120.0, 0.0),
+		"bonk": _sample(0.15, 650.0, 210.0, 0.05),
+		"swing": _sample(0.19, 375.0, 95.0, 0.42),
+		"shield": _sample(0.23, 230.0, 810.0, 0.06),
 	}
 	for i in 8:
 		var player := AudioStreamPlayer.new()

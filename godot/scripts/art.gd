@@ -44,6 +44,36 @@ const BOAR := [
 	"......ODOO.....ODDO.....", "......OOOO.....OOOO.....", "........................", "........................",
 	"........................", "........................", "........................", "........................",
 ]
+const SHIELD := [
+	"...OOOOOOOOOOOOOO...", "..OHYYYYHHHYYYYYDO..", ".OHYYYYYYYYYYYYYYDO.",
+	".OYYYYYYYYYYDDDDDDO.", "..ODDDDDDDDDDDDDOO..", "....OOOVVVVOOOO.....",
+	".....OVVVVVVVO......", "....OVWVOVVVO.......", "....OVVVVVVVVO......",
+	"....OOVVVVVVOO......", "...OOVBBVBBVOOO.....", "...OVBBBBBBBVO......",
+	"...OOVBBBBBOOO......", ".....OBBBOOKO.......", "....OKKOOOKKO.......",
+	"....OOOO.OOOO.......",
+]
+const SHIELD_PALETTE := {
+	"O": "#422f3f", "H": "#fff3ba", "Y": "#ffc965",
+	"D": "#cc7d40", "V": "#9b777e", "W": "#fff9d6", "B": "#657985", "K": "#4d495b",
+}
+const CHIEF := [
+	".......OOO..........", "......OYYYO.........", ".....OYYYYDO........",
+	"...OOYYYYYYDO.......", "..OHHHHHHHDDDDO.....", "...OOOSSSSOOO.......",
+	".....OSOSOSO.....KK.", ".....OSSWSWO....KHK.", "......OWWWO.....KK..",
+	".....OOBBBOO...T....", "....OBGBBBBOO.T.....", "....OBBBBBBOST......",
+	"....OBBBBBOTTO......", ".....OBBBBOO........", ".....OBBBBO.........",
+	".....OBBOBO.........", ".....OTTOOTO........", "....OTTOOTTO........",
+	"....OOOOOOOO........",
+]
+const CHIEF_PALETTE := {
+	"O": "#3f3040", "H": "#ffebb0", "Y": "#e8ad52", "D": "#af653d",
+	"S": "#f2b58a", "W": "#fff2d2", "B": "#498a92", "G": "#8fc7b1",
+	"T": "#805042", "K": "#39465b",
+}
+const GREEN_FRUIT_PALETTE := {
+	"O": "#284934", "L": "#498144", "l": "#9bc760", "T": "#77523a",
+	"R": "#83b64b", "P": "#83b64b", "D": "#4f8c47", "H": "#d5e889", "o": "#2d6c48",
+}
 const BELL := [
 	".......OO.......", ".......OGO......", ".......OO.......", "......OGGO......",
 	".....OHGGGO.....", ".....OHGPGO.....", "....OHGGPGDO....", "....OGGGPGDO....",
