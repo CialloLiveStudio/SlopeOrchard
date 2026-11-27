@@ -95,7 +95,7 @@ static func sprite(rows: Array, colors: Dictionary, white: bool = false) -> Imag
 				bitmap.set_pixel(x, y, Color.WHITE if white else Color(colors[pixel]))
 	return ImageTexture.create_from_image(bitmap)
 
-static func scenery() -> ImageTexture:
+static func scenery(slots: Array) -> ImageTexture:
 	var art := Image.create_empty(480, 270, false, Image.FORMAT_RGBA8)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 7291
@@ -134,7 +134,7 @@ static func scenery() -> ImageTexture:
 		if x % 4 == 0:
 			box(art, x + 1, y - 4, 1, 3, "#39764d")
 	cabin(art)
-	trellis(art)
+	trellis(art, slots)
 	return ImageTexture.create_from_image(art)
 
 static func cloud(width: int) -> ImageTexture:
@@ -175,14 +175,18 @@ static func cabin(art: Image) -> void:
 	box(art, 9, 120, 53, 3, "#59353e")
 	box(art, 12, 120, 46, 1, "#f08461")
 
-static func trellis(art: Image) -> void:
-	for x in [89, 407]:
+static func trellis(art: Image, slots: Array) -> void:
+	var left := int(slots.front()) - 29
+	var right := int(slots.back()) + 22
+	for x in [left + 7, right]:
 		box(art, x, 48, 5, 16, "#5a3c34")
 		box(art, x + 1, 49, 2, 14, "#c99159")
-	box(art, 82, 50, 337, 7, "#5a3c34")
-	box(art, 83, 51, 335, 2, "#e6ad6a")
-	box(art, 84, 53, 334, 2, "#b77a4e")
-	for x in [110, 165, 220, 275, 330, 385]:
+	var width := right - left + 12
+	box(art, left, 50, width, 7, "#5a3c34")
+	box(art, left + 1, 51, width - 2, 2, "#e6ad6a")
+	box(art, left + 2, 53, width - 3, 2, "#b77a4e")
+	for slot in slots:
+		var x := int(slot)
 		box(art, x - 2, 52, 5, 6, "#64463a")
 		box(art, x - 1, 53, 3, 3, "#f3bd72")
 		box(art, x, 57, 1, 2, "#3c6042")

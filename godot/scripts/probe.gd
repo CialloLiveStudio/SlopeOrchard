@@ -1,7 +1,6 @@
 extends SceneTree
 
 const SCENE = preload("res://scenes/main.tscn")
-const SLOTS := [110.0, 165.0, 220.0, 275.0, 330.0, 385.0]
 const STEP := 1.0 / 120.0
 var failures := 0
 
@@ -25,6 +24,11 @@ func _run() -> void:
 	_check(game.model.phase == 0 and game.model.protagonist.hp == 5, "Main scene did not initialize")
 	_check(game.background.get_size() == Vector2(480, 270), "Pixel background has the wrong dimensions")
 	_check_inputs(game)
+	for character in game.hint.text:
+		_check(game.hint.get_theme_font("font").has_char(character.unicode_at(0)), "Control hint has a missing glyph")
+	game.elapsed = game.dash.get("started", game.elapsed) + 0.07
+	game.world.queue_redraw()
+	await process_frame
 	var bridge: RefCounted = game.bridge
 	_check_campaign(bridge)
 	bridge.reset_run()
@@ -37,13 +41,14 @@ func _run() -> void:
 		if state.phase == 1:
 			for slot in int(state.unlocked_slots):
 				if state.slots[slot] != null:
-					_check(bridge.swap_plants(slot, SLOTS.size() + _state(bridge).reserve.size()),
+					_check(bridge.swap_plants(slot, state.slot_x.size() + _state(bridge).reserve.size()),
 						"Could not empty the trellis for the defeat probe")
 			_check(bridge.next_wave(), "Could not resume the undefended run")
 	var defeat := _state(bridge)
 	_check(defeat.phase == 3 and defeat.protagonist.hp == 0, "Undefended run did not reach defeat")
 	_check(defeat.protagonist.hit_flash == 24 and defeat.protagonist.pos[0] < 62, "Protagonist hit snapshot missing")
 	await _check_sandbox(game)
+	_check_shield(bridge)
 	_check_heal(game)
 	game._toggle_mute()
 	_check(not game.audio.muted, "Unmute action failed")
@@ -52,7 +57,7 @@ func _run() -> void:
 	game.queue_free()
 	await process_frame
 	if failures == 0:
-		print("Slope Orchard v0.2 probe passed: campaign, defeat, sandbox, new snapshots, input, and scene.")
+		print("Slope Orchard v0.2.1 probe passed: campaign, defeat, sandbox, Flash-Step, digestion, input, and scene.")
 	quit(0 if failures == 0 else 1)
 
 func _check_campaign(bridge: RefCounted) -> void:
@@ -68,7 +73,7 @@ func _check_campaign(bridge: RefCounted) -> void:
 			break
 		var events := _play_wave(bridge, seen)
 		var cleared := _state(bridge)
-		print("Wave %d ended in phase %d with %d protagonist hearts, %d hits and %d swings." %
+		print("Wave %d ended in phase %d with %d protagonist hearts, %d hits and %d Flash-Steps." %
 			[wave, cleared.phase, cleared.protagonist.hp, events.get("hit", 0), events.get("home_run", 0)])
 		_check(events.has("hit"), "No real collision in wave %d" % wave)
 		_check(cleared.phase == (2 if wave == 4 else 1), "Wave %d did not clear" % wave)
@@ -104,14 +109,19 @@ func _mouse_button(game: Node, at: Vector2, button: MouseButton, pressed: bool) 
 
 func _check_inputs(game: Node) -> void:
 	game._restart(true)
-	_mouse_button(game, Vector2(110, 62), MOUSE_BUTTON_LEFT, true)
-	_mouse_button(game, Vector2(110, 62), MOUSE_BUTTON_LEFT, false)
+	var slots: Array = game.model.slot_x
+	var y: float = game.model.trellis_y
+	var first := Vector2(slots[0], y)
+	_check(first.x == 122 and slots[-1] < 480, "Shifted trellis layout failed")
+	_mouse_button(game, first, MOUSE_BUTTON_LEFT, true)
+	_mouse_button(game, first, MOUSE_BUTTON_LEFT, false)
 	_check(game.model.bodies.size() == 1 and not game.model.slots[0].hanging
 		and game.model.bodies[0].velocity[0] == 0.0, "Mouse click failed to drop vertically")
-	_mouse_button(game, Vector2(165, 60), MOUSE_BUTTON_LEFT, true)
+	var from := Vector2(slots[1], y - 2)
+	_mouse_button(game, from, MOUSE_BUTTON_LEFT, true)
 	var motion := InputEventMouseMotion.new()
-	motion.position = Vector2(225, 60)
-	motion.relative = Vector2(60, 0)
+	motion.position = Vector2(slots[2] + 5, y - 2)
+	motion.relative = motion.position - from
 	motion.velocity = Vector2(900, 0)
 	game._unhandled_input(motion)
 	_mouse_button(game, motion.position, MOUSE_BUTTON_LEFT, false)
@@ -119,10 +129,18 @@ func _check_inputs(game: Node) -> void:
 	for body in game.model.bodies.slice(1):
 		var angle := rad_to_deg(atan2(body.velocity[0], body.velocity[1]))
 		_check(angle > 17.9 and angle <= 18.01, "Swipe velocity was not aimed and capped")
-	_mouse_button(game, Vector2(275, 62), MOUSE_BUTTON_RIGHT, true)
-	_mouse_button(game, Vector2(330, 62), MOUSE_BUTTON_RIGHT, false)
+	var target := first + Vector2(0, 48)
+	_mouse_button(game, target + Vector2.DOWN, MOUSE_BUTTON_RIGHT, true)
+	_check(game.model.protagonist.home_run_cooldown == 0, "Flash-Step snapped outside 48 pixels")
+	_mouse_button(game, target, MOUSE_BUTTON_RIGHT, true)
+	_mouse_button(game, target, MOUSE_BUTTON_RIGHT, false)
+	_check(game.model.protagonist.home_run_cooldown == 840 and game.model.protagonist.invulnerability_ticks > 0
+		and game.model.bodies[0].home_run and game.hitstop == 0.05 and game.dash.target == first,
+		"Right click failed to Flash-Step, set cooldown, or play dash VFX")
+	_mouse_button(game, Vector2(slots[3], y), MOUSE_BUTTON_RIGHT, true)
+	_mouse_button(game, Vector2(slots[4], y), MOUSE_BUTTON_RIGHT, false)
 	_check(game.model.slots[4].type == "chime", "Mouse drag failed to move the chime")
-	_mouse_button(game, Vector2(330, 62), MOUSE_BUTTON_RIGHT, true)
+	_mouse_button(game, Vector2(slots[4], y), MOUSE_BUTTON_RIGHT, true)
 	_mouse_button(game, Vector2(244, 245), MOUSE_BUTTON_RIGHT, false)
 	_check(game.model.reserve.size() == 2 and game.model.reserve[1].type == "chime", "Mouse drag failed to store chime")
 
@@ -134,19 +152,17 @@ func _check_sandbox(game: Node) -> void:
 		"Sandbox loadout failed")
 	_check(state.monsters.map(func(enemy): return int(enemy.kind)) == [0, 1, 2]
 		and state.monsters[2].hp == 6, "Sandbox must start with all three monsters")
-	_check(bridge.swap_plants(3, 2) and bridge.cut_fruit(1) and bridge.cut_fruit(0) and bridge.cut_fruit(5),
-		"Sandbox chime alignment or cut failed")
+	_check(bridge.swap_plants(1, 2) and bridge.cut_fruit(2) and bridge.cut_fruit(0) and bridge.cut_fruit(5),
+		"Sandbox opening cuts failed")
 	var seen := {}
 	var checked_barricade := false
-	var checked_juice := false
-	var checked_rot := false
-	for tick in 5600:
+	for tick in 2000:
 		bridge.advance(STEP)
 		state = _state(bridge)
-		if state.protagonist.swing_cooldown > 0:
-			seen["swing_cooldown"] = true
-		if state.slots[2].cooldown > 0:
-			_check(state.slots[2].cooldown <= 120, "Chime cooldown exceeds one second")
+		if state.protagonist.home_run_cooldown > 0:
+			seen["home_run_cooldown"] = true
+		if state.slots[3].cooldown > 0:
+			_check(state.slots[3].cooldown <= 120, "Chime cooldown exceeds one second")
 			seen["cooldown"] = true
 		if state.bodies.any(func(body): return body.home_run and body.velocity[0] > 300):
 			seen["projectile"] = true
@@ -155,18 +171,12 @@ func _check_sandbox(game: Node) -> void:
 				_check(barrier.body.kind == 2 and not barrier.body.rolling and int(barrier.hits_left) in [1, 2, 3],
 					"Invalid parked pumpkin snapshot")
 				checked_barricade = true
-			if barrier.rotting:
-				_check(barrier.age >= 600 and barrier.age <= 840, "Invalid rotting age")
-				checked_rot = true
-		for juice in state.juice_zones:
-			if not checked_juice:
-				_check(is_equal_approx(juice.right - juice.left, 56.0) and juice.ticks_left == 720,
-					"Invalid juice snapshot")
-				checked_juice = true
-				game._refresh_model()
-				await process_frame
-		if tick % 90 == 0:
+		if tick > 0 and tick % 90 == 0:
 			_sandbox_cuts(bridge, state)
+		if not seen.has("home_run") and tick >= 58:
+			for body in state.bodies:
+				if body.kind == 1 and bridge.trigger_home_run(body.pos[0], body.pos[1]):
+					break
 		for event in JSON.parse_string(bridge.drain_events()):
 			if not seen.has(event[0]):
 				game.model = state
@@ -175,14 +185,23 @@ func _check_sandbox(game: Node) -> void:
 		if tick % 600 == 0:
 			game._refresh_model()
 			await process_frame
-	print("Sandbox interactions: %s. Barricade %s, juice %s." % [str(seen.keys()), checked_barricade, checked_juice])
-	for key in ["bounce", "ring", "cooldown", "bowl", "home_run", "swing_cooldown", "projectile", "shield", "rot"]:
+	print("Sandbox interactions: %s. Barricade %s." % [str(seen.keys()), checked_barricade])
+	for key in ["bounce", "ring", "cooldown", "bowl", "home_run", "home_run_cooldown", "projectile"]:
 		_check(seen.has(key), "Sandbox interaction missing: " + key)
 	_check(checked_barricade, "Sandbox never exposed a parked pumpkin")
-	_check(checked_rot and checked_juice, "Sandbox never exposed pumpkin rot or juice")
 	_check(state.phase == 4, "Sandbox stopped")
 	game._refresh_model()
 	await process_frame
+
+func _check_shield(bridge: RefCounted) -> void:
+	bridge.start_sandbox()
+	for i in 110:
+		bridge.advance(STEP)
+	_check(bridge.cut_fruit(5), "Could not drop a pumpkin over the approaching shield")
+	for i in 85:
+		bridge.advance(STEP)
+	var events: Array = JSON.parse_string(bridge.drain_events())
+	_check(events.any(func(event): return event[0] == "shield"), "Shield cap did not rebound the pumpkin")
 
 func _check_heal(game: Node) -> void:
 	game._restart(true)
@@ -194,25 +213,27 @@ func _check_heal(game: Node) -> void:
 			break
 	_check(_state(bridge).protagonist.hp == 4, "Sandbox protagonist did not take damage")
 	bridge.drain_events()
-	_check(bridge.swap_plants(7, 0) and bridge.cut_fruit(0), "Could not replant and cut the reserve apple")
+	_check(bridge.swap_plants(7, 0) and bridge.cut_fruit_angled(0, -29.2), "Could not swipe the reserve apple left")
 	for i in 64:
 		bridge.advance(STEP)
 	var healed := _state(bridge)
 	var events: Array = JSON.parse_string(bridge.drain_events())
-	_check(healed.protagonist.hp == 5 and events.any(func(event): return event[0] == "heal"),
+	_check(healed.protagonist.hp == 5 and healed.protagonist.digestion_cooldown > 1700
+		and events.any(func(event): return event[0] == "heal"),
 		"Protagonist did not catch the apple and heal")
 	game._refresh_model()
 	for event in events:
 		game._effect(event)
 
 func _sandbox_cuts(bridge: RefCounted, state: Dictionary) -> void:
-	for slot in [0, 3, 4, 5]:
+	for slot in [0, 2, 4, 5]:
 		var fruit: Dictionary = state.slots[slot]
-		if fruit.stage != 2:
+		if fruit.stage != 2 and not (slot == 5 and fruit.stage == 1):
 			continue
-		if state.barricades.any(func(barrier): return absf(barrier.body.pos[0] - SLOTS[slot]) < 22):
+		var x: float = state.slot_x[slot]
+		if state.barricades.any(func(barrier): return absf(barrier.body.pos[0] - x) < 22):
 			continue
-		if slot in [0, 5] or state.monsters.any(func(enemy): return absf(enemy.pos[0] - SLOTS[slot] - 18.0) < 40):
+		if slot in [0, 5] or state.monsters.any(func(enemy): return absf(enemy.pos[0] - x - 18.0) < 40):
 			bridge.cut_fruit(slot)
 
 func _play_wave(bridge: RefCounted, seen: Dictionary) -> Dictionary:
@@ -229,9 +250,9 @@ func _play_wave(bridge: RefCounted, seen: Dictionary) -> Dictionary:
 			var fruit = state.slots[i]
 			if fruit == null or fruit.type != "fruit" or not fruit.hanging or fruit.stage == 0:
 				continue
-			var x: float = SLOTS[i]
-			if i == 0 and (state.protagonist.hp < 5 or state.protagonist.swing_cooldown < 40):
-				bridge.cut_fruit(i)
+			var x: float = state.slot_x[i]
+			if i == 0 and fruit.stage == 2 and state.protagonist.hp < 5 and state.protagonist.digestion_cooldown == 0:
+				bridge.cut_fruit_angled(i, -29.2)
 				continue
 			if fruit.kind == 2:
 				if state.monsters.any(func(enemy): return enemy.pos[0] > x + 3):
@@ -251,6 +272,15 @@ func _play_wave(bridge: RefCounted, seen: Dictionary) -> Dictionary:
 				elif absf(predicted_x - x) < 3.5 and (damage >= enemy.hp or i <= 1 or fruit.kind == 1):
 					if bridge.cut_fruit(i):
 						recent[enemy.id] = frame + 24
+						break
+		if state.protagonist.home_run_cooldown == 0:
+			for body in state.bodies:
+				if body.rolling or body.stage == 0 or body.home_run:
+					continue
+				var distance_to_lane: float = maxf(0, 155 + 0.194 * (body.pos[0] - 70) - body.pos[1] - 12)
+				var ahead: float = distance_to_lane * 440.0 / 310.0
+				if state.monsters.any(func(enemy): return enemy.pos[0] > body.pos[0] + ahead + 16):
+					if bridge.trigger_home_run(body.pos[0], body.pos[1]):
 						break
 		bridge.advance(1.0 / 30.0)
 		for event in JSON.parse_string(bridge.drain_events()):

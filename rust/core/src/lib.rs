@@ -3,14 +3,24 @@ use std::collections::VecDeque;
 pub const DT: f32 = 1.0 / 120.0;
 pub const TRELLIS_Y: f32 = 62.0;
 pub const SLOPE: f32 = 0.194;
-pub const SLOTS: [f32; 6] = [110., 165., 220., 275., 330., 385.];
+pub const SLOTS: [f32; 6] = [122., 175., 228., 281., 334., 387.];
 const GRAVITY: f32 = 610.0;
 const SPAWN_X: f32 = 486.0;
 const CHIEF_X: f32 = 62.0;
+const DOORWAY_REACH_RIGHT: f32 = 115.;
 const MAX_HP: u8 = 5;
 const BUD_TICKS: u32 = 36;
 const CHIME_COOLDOWN: u32 = 120;
-const SWING_COOLDOWN: u32 = 180;
+pub const HOME_RUN_COOLDOWN: u32 = 7 * 120;
+const DIGESTION_COOLDOWN: u32 = 15 * 120;
+const HOME_RUN_IFRAMES: u32 = 18;
+const HOME_RUN_RADIUS: f32 = 48.;
+const HOME_RUN_SPEED: f32 = 440.;
+const HOME_RUN_APPROACH_SPEED: f32 = 310.;
+const HOME_RUN_MELON_ROLL_OUT: f32 = 120.;
+const HOME_RUN_MELON_IMPACT: f32 = 770.;
+const MELON_RESTITUTION: f32 = 0.64;
+const MELON_MIN_REBOUND: f32 = 115.;
 const ROT_TICKS: u32 = 840;
 const JUICE_TICKS: u32 = 720;
 const JUICE_RADIUS: f32 = 28.0;
@@ -32,6 +42,10 @@ pub struct Point {
 impl Point {
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
+    }
+
+    fn distance_squared(self, other: Self) -> f32 {
+        (self.x - other.x).powi(2) + (self.y - other.y).powi(2)
     }
 
     fn within_segment(self, a: Self, b: Self, radius: f32) -> bool {
@@ -135,9 +149,10 @@ pub struct Body {
     pub stage: Stage,
     pub pos: Point,
     pub velocity: Point,
-    pub bounces: u8,
+    pub bounces: u32,
     pub rolling: bool,
     pub home_run: bool,
+    home_run_lane_distance: f32,
     hit: Vec<u32>,
     trellis_contacts: u8,
 }
@@ -156,12 +171,11 @@ impl Body {
             FruitKind::BounceMelon => 0.42,
             FruitKind::BowlingPumpkin => 4.0,
         };
-        let boost = if self.home_run { 1.8 } else { 1.0 };
-        mass * self.stage.scale() * 26.0 * boost
+        mass * self.stage.scale() * 26.0 + if self.home_run { 180. } else { 0. }
     }
 
     fn damage(&self, kind: MonsterKind) -> u8 {
-        match (self.kind, self.stage, kind) {
+        let base = match (self.kind, self.stage, kind) {
             (_, Stage::Small, _) => 1,
             (FruitKind::RedApple, Stage::Giant, MonsterKind::IronBoar) => 6,
             (FruitKind::RedApple, Stage::Giant, _) => 4,
@@ -170,6 +184,15 @@ impl Body {
             (FruitKind::BounceMelon, Stage::Mature, _) => 1,
             (FruitKind::BowlingPumpkin, Stage::Giant, _) => 7,
             (FruitKind::BowlingPumpkin, Stage::Mature, _) => 5,
+        };
+        base + if self.home_run { 2 } else { 0 }
+    }
+
+    fn roll_speed_cap(&self) -> f32 {
+        match (self.home_run, self.stage) {
+            (true, _) => HOME_RUN_SPEED,
+            (false, Stage::Giant) => 170.,
+            (false, _) => 145.,
         }
     }
 }
@@ -242,13 +265,15 @@ pub enum VfxEvent {
     ChiefHit(Point),
     ChiefHeal(Point),
     ChiefBonk(Point),
-    HomeRun(Point),
+    HomeRunDash { from: Point, target: Point },
     ShieldRebound(Point),
 }
 
 pub struct Protagonist {
     pub hp: u8,
-    pub swing_cooldown: u32,
+    pub home_run_cooldown: u32,
+    pub digestion_cooldown: u32,
+    pub invulnerability_ticks: u32,
     pub hit_flash: u32,
 }
 
@@ -258,30 +283,29 @@ impl Protagonist {
         Point::new(x, ground(x) - 11.)
     }
 
-    fn interact(&mut self, body: &mut Body, old: Point) -> Option<VfxEvent> {
+    fn interact(&mut self, body: &Body, old: Point) -> Option<VfxEvent> {
         let y = ground(CHIEF_X) - 22. - body.radius();
         if body.rolling || body.home_run || body.velocity.y <= 0. || old.y > y || body.pos.y < y {
             return None;
         }
         let t = (y - old.y) / (body.pos.y - old.y);
         let x = old.x + (body.pos.x - old.x) * t;
-        if !(CHIEF_X - 10. ..=SLOTS[0] + 7.).contains(&x) {
+        // The doorway reach catches a left swipe from slot zero, whose straight drop stays clear.
+        if !(CHIEF_X - 10. ..=DOORWAY_REACH_RIGHT).contains(&x) {
             return None;
         }
         let contact = Point::new(x, y);
         if body.stage == Stage::Small {
             return Some(VfxEvent::ChiefBonk(contact));
         }
-        if body.kind == FruitKind::RedApple && self.hp < MAX_HP {
+        if body.kind == FruitKind::RedApple
+            && body.stage == Stage::Giant
+            && self.hp < MAX_HP
+            && self.digestion_cooldown == 0
+        {
             self.hp += 1;
+            self.digestion_cooldown = DIGESTION_COOLDOWN;
             return Some(VfxEvent::ChiefHeal(contact));
-        }
-        if self.swing_cooldown == 0 {
-            self.swing_cooldown = SWING_COOLDOWN;
-            body.pos = contact;
-            body.velocity = Point::new(405., -74.);
-            body.home_run = true;
-            return Some(VfxEvent::HomeRun(contact));
         }
         None
     }
@@ -335,7 +359,9 @@ impl Default for Orchard {
             wave: 1,
             protagonist: Protagonist {
                 hp: MAX_HP,
-                swing_cooldown: 0,
+                home_run_cooldown: 0,
+                digestion_cooldown: 0,
+                invulnerability_ticks: 0,
                 hit_flash: 0,
             },
             unlocked_slots: 2,
@@ -477,12 +503,59 @@ impl Orchard {
             bounces: 0,
             rolling: false,
             home_run: false,
+            home_run_lane_distance: 0.,
             hit: Vec::new(),
             trellis_contacts: 0,
         });
         self.slots[slot] = Some(fruit.kind.into());
         self.events
             .push_back(VfxEvent::FruitCut(pos, fruit.kind, vx));
+        true
+    }
+
+    pub fn trigger_home_run(&mut self, cursor: Point) -> bool {
+        if !self.active() || self.protagonist.home_run_cooldown != 0 {
+            return false;
+        }
+        let airborne = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, body)| !body.rolling && body.velocity.y >= 0.)
+            .map(|(index, body)| (false, index, body));
+        let parked = self
+            .barricades
+            .iter()
+            .enumerate()
+            .map(|(index, barrier)| (true, index, &barrier.body));
+        let target = airborne
+            .chain(parked)
+            .filter(|(_, _, body)| body.stage != Stage::Small)
+            .map(|(parked, index, body)| (parked, index, body.pos.distance_squared(cursor)))
+            .filter(|(_, _, distance)| *distance <= HOME_RUN_RADIUS.powi(2))
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+        let Some((parked, index, _)) = target else {
+            return false;
+        };
+
+        let body = if parked {
+            let mut body = self.barricades.remove(index).body;
+            body.rolling = true;
+            self.bodies.push(body);
+            self.bodies.last_mut().unwrap()
+        } else {
+            &mut self.bodies[index]
+        };
+        body.home_run = true;
+        body.velocity = Point::new(HOME_RUN_SPEED, HOME_RUN_SPEED * SLOPE);
+        body.home_run_lane_distance = 0.;
+        body.hit.clear();
+        self.protagonist.home_run_cooldown = HOME_RUN_COOLDOWN;
+        self.protagonist.invulnerability_ticks = HOME_RUN_IFRAMES;
+        self.events.push_back(VfxEvent::HomeRunDash {
+            from: self.protagonist.position(),
+            target: body.pos,
+        });
         true
     }
 
@@ -539,22 +612,29 @@ impl Orchard {
     }
 
     fn rebound(&mut self, body: &mut Body) -> bool {
-        if body.bounces >= 2 {
+        let impact = if body.home_run {
+            HOME_RUN_MELON_IMPACT
+        } else {
+            body.velocity.y
+        };
+        let speed = impact * MELON_RESTITUTION;
+        if speed < MELON_MIN_REBOUND {
             return self.shatter(body);
         }
+        self.launch_melon_rebound(body, speed);
+        self.events.push_back(VfxEvent::MelonBounce(body.pos));
+        true
+    }
+
+    fn launch_melon_rebound(&self, body: &mut Body, speed: f32) {
         body.bounces += 1;
         body.home_run = false;
-        let rise = (body.pos.y - TRELLIS_Y).max(20.);
-        let full_height = rise + 7.;
-        let height = if body.bounces == 1 {
-            full_height
-        } else {
-            full_height * 0.63
-        };
-        let speed = (2.0 * GRAVITY * height).sqrt() + GRAVITY * DT / 2.;
         body.velocity.y = -speed;
         body.velocity.x = if body.pos.x < 460. { 13. } else { -13. };
-        if body.bounces == 1 {
+        let rise = body.pos.y - TRELLIS_Y;
+        let effective_speed = speed - GRAVITY * DT / 2.;
+        let discriminant = effective_speed * effective_speed - 2. * GRAVITY * rise;
+        if rise > 0. && discriminant >= 0. {
             let target = SLOTS
                 .iter()
                 .zip(self.slots)
@@ -565,14 +645,12 @@ impl Orchard {
                 .map(|(x, _)| *x - body.pos.x)
                 .min_by(|a, b| a.abs().total_cmp(&b.abs()));
             if let Some(dx) = target {
-                let travel = (speed - (speed * speed - 2. * GRAVITY * rise).sqrt()) / GRAVITY;
+                let travel = 2. * rise / (effective_speed + discriminant.sqrt());
                 body.velocity.x = (dx / travel).clamp(-185., 185.);
             }
         }
         body.hit.clear();
         body.trellis_contacts = 0;
-        self.events.push_back(VfxEvent::MelonBounce(body.pos));
-        true
     }
 
     fn shatter(&mut self, body: &Body) -> bool {
@@ -588,7 +666,7 @@ impl Orchard {
     }
 
     fn try_barricade_hit(&mut self, body: &mut Body, old: Point) -> Option<bool> {
-        if body.rolling || body.velocity.y <= 0. {
+        if body.rolling || body.home_run || body.velocity.y <= 0. {
             return None;
         }
         let index = self.barricades.iter().position(|barrier| {
@@ -608,7 +686,9 @@ impl Orchard {
             return Some(self.rebound(body));
         }
         let mut parked = self.barricades.remove(index).body;
-        parked.velocity.x = (body.velocity.y * 0.38 + body.velocity.x.max(0.) * 0.4).max(105.);
+        let speed = (body.velocity.y * 0.38 + body.velocity.x.max(0.) * 0.4)
+            .clamp(105., parked.roll_speed_cap());
+        parked.velocity = Point::new(speed, speed * SLOPE);
         parked.rolling = true;
         parked.hit.clear();
         self.events.push_back(VfxEvent::PumpkinBowl(parked.pos));
@@ -642,10 +722,27 @@ impl Orchard {
             } else {
                 1.
             };
-            body.velocity.x += traction * GRAVITY * SLOPE / (1. + SLOPE * SLOPE) * DT;
+            body.velocity.x = (body.velocity.x
+                + traction * GRAVITY * SLOPE / (1. + SLOPE * SLOPE) * DT)
+                .min(body.roll_speed_cap());
             body.velocity.y = body.velocity.x * SLOPE;
             body.pos.x += body.velocity.x * DT;
             body.pos.y = ground(body.pos.x) - radius;
+        } else if body.home_run {
+            // Airborne targets converge on the slope, then keep a constant clearance.
+            let dx = body.velocity.x * DT;
+            let clearance = (ground(old.x) - radius - old.y).max(0.);
+            let descent = (HOME_RUN_APPROACH_SPEED * DT).min(clearance);
+            body.pos.x += dx;
+            body.velocity.y = body.velocity.x * SLOPE + descent / DT;
+            body.pos.y = ground(body.pos.x) - radius - (clearance - descent);
+            if clearance <= descent {
+                body.home_run_lane_distance += dx;
+                if body.kind == FruitKind::BowlingPumpkin {
+                    body.rolling = true;
+                    self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
+                }
+            }
         } else {
             body.velocity.y += GRAVITY * DT;
             body.pos.x += body.velocity.x * DT;
@@ -660,31 +757,30 @@ impl Orchard {
         }
 
         if let Some(event) = self.protagonist.interact(body, old) {
-            let launched = matches!(event, VfxEvent::HomeRun(_));
             let bonked = matches!(event, VfxEvent::ChiefBonk(_));
             self.events.push_back(event);
-            return launched || (bonked && self.shatter(body));
+            return bonked && self.shatter(body);
         }
         if let Some(survives) = self.try_barricade_hit(body, old) {
             return survives;
         }
 
-        for monster in &mut self.monsters {
+        for index in 0..self.monsters.len() {
+            let monster = &mut self.monsters[index];
             if monster.hp == 0 || body.hit.contains(&monster.id) {
                 continue;
             }
             if let Some(contact) = Self::shield_contact(body, old, monster) {
-                if body.kind == FruitKind::BounceMelon && body.bounces >= 2 {
-                    return self.shatter(body);
-                }
-                if body.kind == FruitKind::BounceMelon {
-                    body.bounces += 1;
-                }
                 body.pos = contact;
-                body.velocity.x *= 1.5;
-                body.velocity.y *= -1.5;
-                body.hit.clear();
-                body.trellis_contacts = 0;
+                if body.kind == FruitKind::BounceMelon {
+                    let speed = body.velocity.y * 1.5;
+                    self.launch_melon_rebound(body, speed);
+                } else {
+                    body.velocity.x *= 1.5;
+                    body.velocity.y *= -1.5;
+                    body.hit.clear();
+                    body.trellis_contacts = 0;
+                }
                 self.events.push_back(VfxEvent::ShieldRebound(contact));
                 return true;
             }
@@ -717,18 +813,28 @@ impl Orchard {
             if body.stage == Stage::Small {
                 return self.shatter(body);
             }
+            if body.home_run
+                && monster.kind == MonsterKind::GreenSlime
+                && body.kind != FruitKind::BowlingPumpkin
+            {
+                body.velocity.x *= 0.98;
+                body.velocity.y *= 0.98;
+                continue;
+            }
             match body.kind {
                 FruitKind::RedApple => return self.shatter(body),
                 FruitKind::BounceMelon => return self.rebound(body),
                 FruitKind::BowlingPumpkin => {
                     self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
-                    if body.rolling {
-                        let retained_speed = if monster.kind == MonsterKind::GreenSlime {
-                            0.57
-                        } else {
-                            0.38
+                    if body.rolling || body.home_run {
+                        let retained_speed = match (body.stage, monster.kind) {
+                            (Stage::Giant, MonsterKind::GreenSlime) => 0.92,
+                            (_, MonsterKind::GreenSlime) => 0.88,
+                            (Stage::Giant, _) => 0.60,
+                            (_, _) => 0.45,
                         };
                         body.velocity.x *= retained_speed;
+                        body.velocity.y *= retained_speed;
                         if body.velocity.x < ROLL_THRESHOLD {
                             break;
                         }
@@ -737,7 +843,13 @@ impl Orchard {
             }
         }
 
-        if !body.rolling && body.pos.y + radius >= ground(body.pos.x) {
+        if body.home_run {
+            if body.kind == FruitKind::BounceMelon
+                && body.home_run_lane_distance >= HOME_RUN_MELON_ROLL_OUT
+            {
+                return self.rebound(body);
+            }
+        } else if !body.rolling && body.pos.y + radius >= ground(body.pos.x) {
             body.pos.y = ground(body.pos.x) - radius;
             if body.stage == Stage::Small {
                 return self.shatter(body);
@@ -749,7 +861,8 @@ impl Orchard {
                     body.rolling = true;
                     body.velocity.x = ((body.velocity.x + body.velocity.y * SLOPE)
                         / (1. + SLOPE * SLOPE))
-                        .max(ROLL_THRESHOLD + 5.);
+                        .clamp(ROLL_THRESHOLD + 5., body.roll_speed_cap());
+                    body.velocity.y = body.velocity.x * SLOPE;
                     self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
                 }
             }
@@ -911,7 +1024,8 @@ impl Orchard {
             self.spawned += 1;
         }
         self.tick += 1;
-        self.protagonist.swing_cooldown = self.protagonist.swing_cooldown.saturating_sub(1);
+        self.protagonist.home_run_cooldown = self.protagonist.home_run_cooldown.saturating_sub(1);
+        self.protagonist.digestion_cooldown = self.protagonist.digestion_cooldown.saturating_sub(1);
         self.protagonist.hit_flash = self.protagonist.hit_flash.saturating_sub(1);
 
         for slot in 0..self.unlocked_slots {
@@ -951,11 +1065,15 @@ impl Orchard {
             }
         }
 
-        self.monsters.retain(|monster| {
+        self.monsters.retain_mut(|monster| {
             if monster.hp == 0 {
                 return false;
             }
             if monster.pos.x <= CHIEF_X {
+                if self.protagonist.invulnerability_ticks > 0 {
+                    monster.pos.x = CHIEF_X;
+                    return true;
+                }
                 self.protagonist.hp = self.protagonist.hp.saturating_sub(1);
                 self.protagonist.hit_flash = 24;
                 self.events
@@ -964,6 +1082,8 @@ impl Orchard {
             }
             true
         });
+        self.protagonist.invulnerability_ticks =
+            self.protagonist.invulnerability_ticks.saturating_sub(1);
 
         if self.protagonist.hp == 0 {
             if sandbox {
@@ -1142,40 +1262,81 @@ mod tests {
     }
 
     #[test]
-    fn melon_reaches_trellis_then_loses_height_and_shatters_on_third_impact() {
-        for stage in [Stage::Mature, Stage::Giant] {
-            let mut orchard = Orchard::default();
-            let kind = FruitKind::BounceMelon;
-            let y = ground(385.) - kind.radius() * stage.scale();
-            let mut body = body_at(
-                &mut orchard,
-                kind,
-                stage,
-                Point::new(385., y),
-                Point::new(0., 350.),
-            );
-            let mut apex = [y; 2];
-            for _ in 0..360 {
-                if !orchard.move_body(&mut body) {
-                    break;
+    fn vertically_dropped_melons_decay_to_two_rebounds_across_the_trellis() {
+        for (slot, x) in SLOTS.into_iter().enumerate() {
+            for stage in [Stage::Mature, Stage::Giant] {
+                let mut orchard = Orchard {
+                    unlocked_slots: SLOTS.len(),
+                    ..Orchard::default()
+                };
+                let kind = FruitKind::BounceMelon;
+                set_fruit(&mut orchard, slot, kind, stage);
+                assert!(orchard.cut_fruit(slot));
+                let mut body = orchard.bodies.pop().unwrap();
+                let floor = ground(x) - body.radius();
+                let mut apex = [floor; 2];
+                for _ in 0..360 {
+                    let before = body.bounces;
+                    let impact = body.velocity.y + GRAVITY * DT;
+                    if !orchard.move_body(&mut body) {
+                        assert!(impact * MELON_RESTITUTION < MELON_MIN_REBOUND);
+                        break;
+                    }
+                    if body.bounces > before {
+                        assert!((body.velocity.y + impact * 0.64).abs() < 0.001);
+                    }
+                    if body.bounces != 0 {
+                        let height = &mut apex[(body.bounces - 1) as usize];
+                        *height = height.min(body.pos.y);
+                    }
                 }
-                if body.bounces != 0 {
-                    let height = &mut apex[usize::from(body.bounces - 1)];
-                    *height = height.min(body.pos.y);
-                }
+                assert!(floor - apex[0] > 30.);
+                assert!((0.33..0.46).contains(&((floor - apex[1]) / (floor - apex[0]))));
+                assert_eq!(body.bounces, 2);
+                assert!(matches!(
+                    orchard.events.back(),
+                    Some(VfxEvent::FruitShatter(..))
+                ));
             }
-            assert!(apex[0] <= TRELLIS_Y);
-            assert!((0.60..=0.65).contains(&((y - apex[1]) / (y - apex[0]))));
-            assert_eq!(body.bounces, 2);
-            assert!(matches!(
-                orchard.events.back(),
-                Some(VfxEvent::FruitShatter(..))
-            ));
-            assert_eq!(
-                body.damage(MonsterKind::GreenSlime),
-                if stage == Stage::Mature { 1 } else { 2 }
-            );
         }
+    }
+
+    #[test]
+    fn shield_boosted_melon_rings_a_chime_and_outlasts_three_bounces() {
+        let mut orchard = Orchard::default();
+        let x = SLOTS[1];
+        orchard.slots[1] = Some(SlotItem::Chime { cooldown: 0 });
+        orchard.spawn(MonsterKind::Shield, x);
+        let mut melon = body_at(
+            &mut orchard,
+            FruitKind::BounceMelon,
+            Stage::Giant,
+            Point::new(x, TRELLIS_Y),
+            Point::default(),
+        );
+        for _ in 0..100 {
+            assert!(orchard.move_body(&mut melon));
+            if melon.bounces > 0 {
+                break;
+            }
+        }
+        assert_eq!(melon.bounces, 1);
+        assert_eq!(orchard.monsters[0].hp, MonsterKind::Shield.hp());
+        orchard.monsters.clear();
+        for _ in 0..700 {
+            if !orchard.move_body(&mut melon) {
+                break;
+            }
+        }
+        assert!(melon.bounces > 3);
+        assert!(orchard
+            .events
+            .iter()
+            .any(|e| matches!(e, VfxEvent::ChimeRing(_))));
+        assert!(matches!(
+            orchard.events.back(),
+            Some(VfxEvent::FruitShatter(..))
+        ));
     }
 
     fn park_pumpkin() -> Orchard {
@@ -1297,55 +1458,280 @@ mod tests {
     }
 
     #[test]
-    fn protagonist_bonks_heals_and_launches_with_cooldown() {
-        let mut orchard = Orchard::default();
-        orchard.spawn(MonsterKind::GreenSlime, CHIEF_X);
-        orchard.step();
-        assert_eq!(orchard.protagonist.hp, 4);
-        assert_eq!(orchard.protagonist.hit_flash, 24);
-        assert!(orchard.monsters.is_empty());
-        for (stage, heal) in [
-            (Stage::Small, false),
-            (Stage::Mature, true),
-            (Stage::Giant, false),
-        ] {
+    fn slot_zero_vertical_drop_hits_the_slope_without_touching_the_protagonist() {
+        for stage in [Stage::Small, Stage::Mature, Stage::Giant] {
+            let mut orchard = Orchard::default();
+            orchard.protagonist.hp = 4;
+            orchard.spawn(MonsterKind::GreenSlime, SLOTS[0] + 14.);
             set_fruit(&mut orchard, 0, FruitKind::RedApple, stage);
             assert!(orchard.cut_fruit(0));
+            for _ in 0..82 {
+                orchard.step();
+            }
+            assert_eq!(orchard.protagonist.hp, 4);
+            assert!(orchard
+                .events
+                .iter()
+                .any(|e| matches!(e, VfxEvent::MonsterHit(..))));
+            assert!(!orchard.events.iter().any(|e| matches!(
+                e,
+                VfxEvent::ChiefHeal(_) | VfxEvent::ChiefBonk(_) | VfxEvent::HomeRunDash { .. }
+            )));
+        }
+    }
+
+    #[test]
+    fn protagonist_bonks_small_fruit_and_digests_only_giant_apples_for_fifteen_seconds() {
+        let mut orchard = Orchard::default();
+        orchard.protagonist.hp = 3;
+        for stage in [Stage::Small, Stage::Mature] {
+            set_fruit(&mut orchard, 0, FruitKind::RedApple, stage);
+            assert!(orchard.cut_fruit_angled(0, -MAX_CUT_VX));
             for _ in 0..64 {
                 orchard.step();
             }
-            if stage == Stage::Giant {
-                let launched = &orchard.bodies[0];
-                assert!(
-                    launched.home_run && launched.velocity.x > 400. && launched.pos.x > SLOTS[0]
-                );
-                assert!(orchard.protagonist.swing_cooldown > 150);
-                let mut next = body_at(
-                    &mut orchard,
-                    FruitKind::BowlingPumpkin,
-                    Stage::Mature,
-                    Point::new(SLOTS[0], 122.),
-                    Point::new(0., 340.),
-                );
-                assert!(orchard.move_body(&mut next));
-                assert!(!next.home_run);
-            } else {
-                assert!(orchard.bodies.is_empty());
-                assert_eq!(orchard.protagonist.hp, if heal { 5 } else { 4 });
-            }
+            assert_eq!(orchard.protagonist.hp, 3);
         }
         assert!(orchard
             .events
             .iter()
             .any(|e| matches!(e, VfxEvent::ChiefBonk(_))));
+        let drop_at_door = |stage, orchard: &mut Orchard| {
+            let mut body = body_at(
+                orchard,
+                FruitKind::RedApple,
+                stage,
+                Point::new(CHIEF_X, TRELLIS_Y),
+                Point::default(),
+            );
+            while orchard.move_body(&mut body) {}
+        };
+
+        set_fruit(&mut orchard, 0, FruitKind::RedApple, Stage::Giant);
+        assert!(orchard.cut_fruit_angled(0, -MAX_CUT_VX));
+        for _ in 0..60 {
+            orchard.step();
+            if orchard.protagonist.hp == 4 {
+                break;
+            }
+        }
+        assert_eq!(orchard.protagonist.hp, 4);
+        assert_eq!(orchard.protagonist.digestion_cooldown, 1800);
+        orchard.spawned = 100;
+        for _ in 0..1799 {
+            orchard.step();
+        }
+        assert_eq!(orchard.protagonist.digestion_cooldown, 1);
+        drop_at_door(Stage::Giant, &mut orchard);
+        assert_eq!(orchard.protagonist.hp, 4);
+        orchard.step();
+        assert_eq!(orchard.protagonist.digestion_cooldown, 0);
+        drop_at_door(Stage::Giant, &mut orchard);
+        assert_eq!(orchard.protagonist.hp, 5);
+        orchard.protagonist.digestion_cooldown = 0;
+        drop_at_door(Stage::Giant, &mut orchard);
+        assert_eq!(orchard.protagonist.hp, 5);
+        assert_eq!(orchard.protagonist.digestion_cooldown, 0);
+    }
+
+    #[test]
+    fn flash_step_snaps_to_nearest_valid_fruit_and_recharges_after_seven_seconds() {
+        let mut orchard = Orchard::default();
+        let cursor = Point::new(200., 80.);
+        for (stage, x, vy) in [
+            (Stage::Mature, 248., 25.),
+            (Stage::Giant, 150., 25.),
+            (Stage::Small, 200., 25.),
+            (Stage::Giant, 210., -25.),
+        ] {
+            let body = body_at(
+                &mut orchard,
+                FruitKind::RedApple,
+                stage,
+                Point::new(x, 80.),
+                Point::new(0., vy),
+            );
+            orchard.bodies.push(body);
+        }
+        assert!(!orchard.trigger_home_run(Point::new(200., 129.)));
+        assert_eq!(orchard.protagonist.home_run_cooldown, 0);
+        assert!(orchard.trigger_home_run(cursor));
+        assert!(orchard.bodies[0].home_run);
+        assert!(orchard.bodies[1..].iter().all(|body| !body.home_run));
+        assert!(matches!(orchard.events.back(),
+            Some(VfxEvent::HomeRunDash { from, target }) if from.x == CHIEF_X && target.x == 248.
+        ));
+        assert_eq!(orchard.protagonist.home_run_cooldown, 840);
+        orchard.spawn(MonsterKind::GreenSlime, CHIEF_X);
+        for _ in 0..HOME_RUN_IFRAMES {
+            orchard.step();
+            assert_eq!(orchard.protagonist.hp, 5);
+        }
+        orchard.step();
+        assert_eq!(orchard.protagonist.hp, 4);
+        orchard.spawned = 100;
+        for _ in (HOME_RUN_IFRAMES + 1)..839 {
+            orchard.step();
+        }
+        assert_eq!(orchard.protagonist.home_run_cooldown, 1);
+        set_fruit(&mut orchard, 0, FruitKind::RedApple, Stage::Mature);
+        assert!(orchard.cut_fruit(0));
+        let closest = orchard.bodies.last().unwrap();
+        let (closest_id, next) = (closest.id, closest.pos);
+        let farther = body_at(
+            &mut orchard,
+            FruitKind::BounceMelon,
+            Stage::Giant,
+            Point::new(next.x + 30., next.y),
+            Point::default(),
+        );
+        orchard.bodies.push(farther);
+        assert!(!orchard.trigger_home_run(next));
+        orchard.step();
+        assert_eq!(orchard.protagonist.home_run_cooldown, 0);
+        assert!(orchard.trigger_home_run(next));
+        assert_eq!(
+            orchard.bodies.iter().find(|body| body.home_run).unwrap().id,
+            closest_id
+        );
+    }
+
+    #[test]
+    fn flat_home_run_pierces_slimes_then_hits_the_shield_body_for_bonus_damage() {
+        let mut orchard = Orchard::default();
+        orchard.spawn(MonsterKind::GreenSlime, 184.);
+        orchard.spawn(MonsterKind::GreenSlime, 223.);
+        orchard.spawn(MonsterKind::Shield, 270.);
+        let kind = FruitKind::RedApple;
+        let stage = Stage::Mature;
+        let pos = Point::new(160., ground(160.) - kind.radius() * stage.scale() - 1.);
+        let apple = body_at(&mut orchard, kind, stage, pos, Point::new(0., 10.));
+        orchard.bodies.push(apple);
+        assert!(orchard.trigger_home_run(pos));
+        let mut apple = orchard.bodies.pop().unwrap();
+        while orchard.move_body(&mut apple) {
+            assert!((apple.velocity.y / apple.velocity.x - SLOPE).abs() < 0.35);
+            assert!(apple.velocity.x > 420.);
+        }
+        assert_eq!(orchard.monsters[0].hp, 0);
+        assert_eq!(orchard.monsters[1].hp, 0);
+        assert_eq!(orchard.monsters[2].hp, 2);
+        assert!(orchard.monsters[2].knockback > 180.);
+        assert!(!orchard
+            .events
+            .iter()
+            .any(|e| matches!(e, VfxEvent::ShieldRebound(_))));
+    }
+
+    #[test]
+    fn home_run_refills_melon_for_a_high_rebound_and_restarts_parked_pumpkin() {
+        let mut orchard = Orchard::default();
+        let x = SLOTS[1];
+        orchard.slots[1] = Some(SlotItem::Chime { cooldown: 0 });
+        orchard.spawn(MonsterKind::IronBoar, x + 22.);
+        let kind = FruitKind::BounceMelon;
+        let pos = Point::new(
+            x - 20.,
+            ground(x - 20.) - kind.radius() * Stage::Giant.scale(),
+        );
+        let melon = body_at(&mut orchard, kind, Stage::Giant, pos, Point::new(0., 10.));
+        orchard.bodies.push(melon);
+        assert!(orchard.trigger_home_run(pos));
+        let mut melon = orchard.bodies.pop().unwrap();
+        for _ in 0..40 {
+            assert!(orchard.move_body(&mut melon));
+            if melon.bounces > 0 {
+                break;
+            }
+        }
+        assert_eq!(orchard.monsters[0].hp, 5);
+        assert!(orchard.monsters[0].knockback > 80.);
+        assert_eq!(melon.velocity.y, -HOME_RUN_MELON_IMPACT * 0.64);
+        orchard.monsters.clear();
+        for _ in 0..700 {
+            if !orchard.move_body(&mut melon) {
+                break;
+            }
+        }
+        assert!(melon.bounces > 3);
         assert!(orchard
             .events
             .iter()
-            .any(|e| matches!(e, VfxEvent::ChiefHeal(_))));
-        assert!(orchard
-            .events
-            .iter()
-            .any(|e| matches!(e, VfxEvent::HomeRun(_))));
+            .any(|e| matches!(e, VfxEvent::ChimeRing(_))));
+
+        let mut orchard = park_pumpkin();
+        let parked = orchard.barricades[0].body();
+        let (id, pos) = (parked.id, parked.pos);
+        assert!(orchard.trigger_home_run(Point::new(pos.x, pos.y + 48.)));
+        assert!(orchard.barricades.is_empty());
+        let pumpkin = &orchard.bodies[0];
+        assert_eq!(pumpkin.id, id);
+        assert!(pumpkin.rolling && pumpkin.home_run && pumpkin.velocity.x == HOME_RUN_SPEED);
+    }
+
+    #[test]
+    fn rolling_pumpkins_regain_speed_between_hits_and_lose_speed_by_monster_weight() {
+        for (stage, light, heavy) in [(Stage::Mature, 0.88, 0.45), (Stage::Giant, 0.92, 0.60)] {
+            let mut orchard = Orchard::default();
+            let kind = FruitKind::BowlingPumpkin;
+            let mut pumpkin = body_at(
+                &mut orchard,
+                kind,
+                stage,
+                Point::new(100., ground(100.) - kind.radius() * stage.scale()),
+                Point::new(80., 0.),
+            );
+            pumpkin.rolling = true;
+            let acceleration = GRAVITY * SLOPE / (1. + SLOPE * SLOPE) * DT;
+            for kind in [
+                MonsterKind::GreenSlime,
+                MonsterKind::GreenSlime,
+                MonsterKind::GreenSlime,
+                MonsterKind::GreenSlime,
+                MonsterKind::GreenSlime,
+                MonsterKind::IronBoar,
+                MonsterKind::Shield,
+            ] {
+                let offset = pumpkin.radius() + kind.radius() - 6.;
+                orchard.spawn(kind, pumpkin.pos.x + offset);
+                let next = (pumpkin.velocity.x + acceleration).min(pumpkin.roll_speed_cap());
+                assert!(orchard.move_body(&mut pumpkin));
+                let retention = if kind == MonsterKind::GreenSlime {
+                    light
+                } else {
+                    heavy
+                };
+                assert!(
+                    (pumpkin.velocity.x - next * retention).abs() < 0.001,
+                    "{stage:?} vs {kind:?}"
+                );
+                let enemy = orchard.monsters.last().unwrap();
+                assert!(enemy.hp < kind.hp() && enemy.knockback > 0.);
+                if kind == MonsterKind::GreenSlime {
+                    assert!(pumpkin.velocity.x > ROLL_THRESHOLD);
+                    let before = pumpkin.velocity.x;
+                    for _ in 0..16 {
+                        assert!(orchard.move_body(&mut pumpkin));
+                    }
+                    assert!(pumpkin.velocity.x > before);
+                }
+            }
+            assert!(pumpkin.velocity.x < ROLL_THRESHOLD);
+        }
+
+        let mut orchard = Orchard::default();
+        let mut pumpkin = body_at(
+            &mut orchard,
+            FruitKind::BowlingPumpkin,
+            Stage::Giant,
+            Point::new(80., ground(80.) - 11.4),
+            Point::new(100., 0.),
+        );
+        pumpkin.rolling = true;
+        for _ in 0..160 {
+            assert!(orchard.move_body(&mut pumpkin));
+        }
+        assert_eq!(pumpkin.velocity.x, pumpkin.roll_speed_cap());
     }
 
     #[test]
@@ -1376,15 +1762,5 @@ mod tests {
         assert!(!orchard.move_body(&mut side));
         assert_eq!(orchard.monsters[0].hp, 4);
         assert!(orchard.monsters[0].knockback > 0.);
-        let mut home_run = body_at(
-            &mut orchard,
-            kind,
-            stage,
-            Point::new(center.x - 12., center.y + 4.),
-            Point::new(405., -20.),
-        );
-        home_run.home_run = true;
-        assert!(!orchard.move_body(&mut home_run));
-        assert_eq!(orchard.monsters[0].hp, 2);
     }
 }

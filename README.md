@@ -2,7 +2,9 @@
 
 Defend the cabin through four waves. Hover to line up a drop, then click a fruit or hold the left mouse button and swipe across several. Wait for fruit to ripen for stronger hits, or cut early to catch an enemy under a hook. Overripe fruit drops on its own.
 
-Between waves, drag plants between hooks and move chimes to the gaps. The final grant adds a seventh plant to the reserve, which you can swap with any of the six planted hooks. Select 下一波 to resume. In 满配沙盒, enemies keep coming and you can rearrange plants with the right mouse button while the simulation runs.
+Right-click near a falling ripe fruit or a parked pumpkin to launch a Flash-Step Home Run. The bar by the doorway fills as the seven-second cooldown expires. Swipe left across the first hook to feed the protagonist a Giant Red Apple when he is hurt. Each apple restores one heart, with a 15-second digestion period between heals.
+
+Between waves, drag plants between hooks and move chimes to the gaps. The final grant adds a seventh plant to the reserve, which you can swap with any of the six planted hooks. Select 下一波 to resume. In 满配沙盒, enemies keep coming and you can rearrange plants while the simulation runs. Hold Shift when dragging to keep the Home Run from triggering.
 
 ## Windows
 

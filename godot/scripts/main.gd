@@ -3,12 +3,10 @@ extends Node2D
 const Art = preload("res://scripts/art.gd")
 const RetroAudio = preload("res://scripts/retro_audio.gd")
 const FONT = preload("res://assets/SlopeOrchardSansSC.ttf")
-const SLOTS := [110.0, 165.0, 220.0, 275.0, 330.0, 385.0]
 const CLOUDS := [
 	Vector3i(14, 70, 31), Vector3i(88, 35, 45), Vector3i(174, 79, 37),
 	Vector3i(262, 31, 42), Vector3i(346, 90, 50), Vector3i(415, 54, 48),
 ]
-const HOOK_Y := 62.0
 const RESERVE := Vector2(223, 245)
 const RESERVE_STEP := 21
 const INK := Color("#202b3e")
@@ -22,9 +20,12 @@ const INTERMISSION := 1
 const VICTORY := 2
 const DEFEAT := 3
 const SANDBOX := 4
+const DASH_VFX_TIME := 0.23
 
 var bridge: RefCounted
 var model: Dictionary
+var slot_x: Array
+var hook_y: float
 var background: Texture2D
 var clouds: Array[ImageTexture] = []
 var fruit_textures: Array[ImageTexture] = []
@@ -60,11 +61,15 @@ var drag_button := 0
 var drag_item: Dictionary = {}
 var flashes := {}
 var effects: Array[Dictionary] = []
+var dash: Dictionary = {}
 var current_phase := -1
 
 func _ready() -> void:
 	bridge = ClassDB.instantiate("OrchardBridge")
-	background = Art.scenery()
+	var layout: Dictionary = JSON.parse_string(bridge.snapshot())
+	slot_x = layout.slot_x
+	hook_y = layout.trellis_y
+	background = Art.scenery(slot_x)
 	for cloud in CLOUDS:
 		clouds.append(Art.cloud(cloud.z))
 	for i in Art.FRUIT.size():
@@ -151,6 +156,7 @@ func _restart(sandbox: bool) -> void:
 	hitstop = 0
 	shake = 0
 	effects.clear()
+	dash.clear()
 	flashes.clear()
 	trail.clear()
 	for child in world.get_children():
@@ -183,10 +189,8 @@ func _refresh_model() -> void:
 				hint.text = "胜利 · 果园守住了！"
 			DEFEAT:
 				hint.text = "失败 · 果园失守"
-			SANDBOX:
-				hint.text = "左键切果 · 右键拖动"
 			_:
-				hint.text = "点按或按住左键划过果实"
+				hint.text = "左键切果 · 右键 Home Run"
 	hud.queue_redraw()
 	world.queue_redraw()
 
@@ -211,6 +215,9 @@ func _process(delta: float) -> void:
 	hitstop -= frozen
 	bridge.advance(delta - frozen)
 	_refresh_model()
+	_drain_events()
+
+func _drain_events() -> void:
 	for event in JSON.parse_string(bridge.drain_events()):
 		_effect(event)
 
@@ -218,6 +225,12 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT]:
 		mouse = event.position
 		if event.pressed:
+			if event.button_index == MOUSE_BUTTON_RIGHT and not event.shift_pressed:
+				var target := mouse - world.position
+				if bridge.trigger_home_run(target.x, target.y):
+					_refresh_model()
+					_drain_events()
+					return
 			if _begin_drag(event.button_index, event.shift_pressed):
 				return
 			if event.button_index == MOUSE_BUTTON_LEFT and model.phase in [WAVE, SANDBOX]:
@@ -252,8 +265,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_cut_along(from, event.position, vx if trail_angled else 0.0)
 
 func _slot_near(point: Vector2, distance: float) -> int:
-	for i in SLOTS.size():
-		if point.distance_to(Vector2(SLOTS[i], HOOK_Y)) <= distance:
+	for i in slot_x.size():
+		if point.distance_to(Vector2(slot_x[i], hook_y)) <= distance:
 			return i
 	return -1
 
@@ -267,7 +280,7 @@ func _tray_index(point: Vector2, allow_empty: bool) -> int:
 	if absf(point.x - (RESERVE.x + index * RESERVE_STEP)) > RESERVE_STEP * 0.5:
 		return -1
 	var limit: int = model.reserve.size() + (1 if allow_empty else 0)
-	return index + SLOTS.size() if index >= 0 and index < limit else -1
+	return index + slot_x.size() if index >= 0 and index < limit else -1
 
 func _begin_drag(button: int, shift: bool) -> bool:
 	if model.phase not in [INTERMISSION, SANDBOX]:
@@ -279,7 +292,7 @@ func _begin_drag(button: int, shift: bool) -> bool:
 		index = _tray_index(mouse, false)
 	if index < 0:
 		return false
-	var item = model.slots[index] if index < SLOTS.size() else model.reserve[index - SLOTS.size()]
+	var item = model.slots[index] if index < slot_x.size() else model.reserve[index - slot_x.size()]
 	if item == null:
 		return false
 	dragged_item = index
@@ -291,7 +304,7 @@ func _finish_drag() -> void:
 	if dragged_item >= 0:
 		var target := _slot_near(mouse, 24)
 		if target < 0:
-			target = _tray_index(mouse, dragged_item < SLOTS.size())
+			target = _tray_index(mouse, dragged_item < slot_x.size())
 		if target >= 0:
 			bridge.swap_plants(dragged_item, target)
 	_stop_drag()
@@ -303,7 +316,7 @@ func _stop_drag() -> void:
 	drag_item = {}
 
 func _fruit_center(index: int) -> Vector2:
-	return Vector2(SLOTS[index] + sin(elapsed * 2.6 + index * 1.2) * 1.5, HOOK_Y)
+	return Vector2(slot_x[index] + sin(elapsed * 2.6 + index * 1.2) * 1.5, hook_y)
 
 func _cut_along(from: Vector2, to: Vector2, vx: float) -> void:
 	for i in int(model.unlocked_slots):
@@ -336,7 +349,7 @@ func _paint_hud() -> void:
 		for i in size + empty_target:
 			var at := RESERVE + Vector2(i * RESERVE_STEP, 0)
 			hud.draw_rect(Rect2(at - Vector2(9, 9), Vector2(19, 19)), Color("#41516a"), false)
-			if i >= size or dragged_item == i + SLOTS.size():
+			if i >= size or dragged_item == i + slot_x.size():
 				continue
 			var item = model.reserve[i]
 			var texture := bell if item.type == "chime" else fruit_textures[int(item.kind)]
@@ -399,25 +412,17 @@ func _paint_world() -> void:
 	world.draw_texture(background, Vector2.ZERO)
 	for zone in model.juice_zones:
 		_paint_juice(zone)
-	var hero := _vec(model.protagonist.pos)
-	var flashing := int(model.protagonist.hit_flash) > 0 and int(model.protagonist.hit_flash) % 8 >= 3
-	_stamp(chief_flash if flashing else chief, hero)
-	if model.protagonist.swing_cooldown >= 162.0:
-		var angle := lerpf(-1.35, 0.45, (180.0 - model.protagonist.swing_cooldown) / 18.0)
-		var grip := hero + Vector2(3, 1)
-		var tool := grip + Vector2.from_angle(angle) * 16.0
-		world.draw_line(grip.round(), tool.round(), Color("#805042"), 2)
-		world.draw_rect(Rect2(tool.round() - Vector2(2, 2), Vector2(5, 4)), Color("#fff3ba"))
+	_paint_protagonist()
 	var active: bool = model.phase in [WAVE, SANDBOX]
 	var focus := _slot_near(mouse, 14.0)
 	if active and focus >= 0 and model.slots[focus] != null and model.slots[focus].get("hanging", false):
-		var x: float = SLOTS[focus]
+		var x: float = slot_x[focus]
 		var floor_y := roundi(_ground(x))
 		for y in range(77, floor_y, 6):
 			world.draw_rect(Rect2(x, y, 1, mini(3, floor_y - y)), Color("#ffffff88"))
 		world.draw_rect(Rect2(x - 4, floor_y, 9, 1), Color("#fff8caaa"))
-	for i in SLOTS.size():
-		var x: float = SLOTS[i]
+	for i in slot_x.size():
+		var x: float = slot_x[i]
 		var item = model.slots[i]
 		if i >= model.unlocked_slots:
 			world.draw_rect(Rect2(x - 10, 55, 21, 18), Color("#46586488"))
@@ -426,7 +431,7 @@ func _paint_world() -> void:
 			world.draw_rect(Rect2(x - 9, 62, 19, 2), Color("#677989"))
 			continue
 		if dragged_item >= 0:
-			world.draw_rect(Rect2(x - 10, HOOK_Y - 8, 21, 20), Color("#fff0a9c8"), false)
+			world.draw_rect(Rect2(x - 10, hook_y - 8, 21, 20), Color("#fff0a9c8"), false)
 		if item == null:
 			world.draw_rect(Rect2(x - 1, 59, 3, 3), Color("#446252"))
 		elif dragged_item != i:
@@ -443,10 +448,12 @@ func _paint_world() -> void:
 		if body.kind == 1 and body.velocity[1] < -300:
 			scaling *= Vector2(0.86, 1.14)
 		var texture := green_fruits[int(body.kind)] if body.stage == 0 else fruit_textures[int(body.kind)]
-		if body.home_run:
+		if body.home_run and body.velocity[0] > 200.0:
+			var direction := _vec(body.velocity).normalized()
 			for i in 3:
-				var y := roundf(pos.y) - 3 + i * 3
-				world.draw_rect(Rect2(roundf(pos.x) - 23 + i * 3, y, 11 - i * 2, 1), Color("#ffe58bbf"))
+				var streak := pos + Vector2(0, -4 + i * 4)
+				world.draw_line((streak - direction * (26 - i * 3)).round(),
+					(streak - direction * 7).round(), Color("#fffffff0"), 1)
 		if body.rolling:
 			world.draw_set_transform(pos.round(), floorf(pos.x / 6.0) * PI / 8.0, scaling)
 			world.draw_texture(texture, -texture.get_size() / 2.0)
@@ -508,6 +515,58 @@ func _paint_world() -> void:
 func _vec(pair: Array) -> Vector2:
 	return Vector2(pair[0], pair[1])
 
+func _dash_progress(age: float) -> float:
+	return clampf(minf(age / 0.035, (DASH_VFX_TIME - age) / 0.09), 0.0, 1.0)
+
+func _paint_protagonist() -> void:
+	var door := _vec(model.protagonist.pos)
+	var hero := door
+	var charging := float(model.protagonist.home_run_charge)
+	var tool_angle := -0.78
+	if not dash.is_empty():
+		var age := elapsed - float(dash.started)
+		if age < DASH_VFX_TIME:
+			var start: Vector2 = dash.from
+			var finish: Vector2 = dash.target + Vector2(-12, 4)
+			for delay in [0.042, 0.027, 0.012]:
+				var afterimage := start.lerp(finish, _dash_progress(age - delay))
+				if afterimage.distance_to(start) > 3:
+					_stamp(chief_flash, afterimage, Vector2.ONE, Color(0.85, 0.95, 1.0, 0.26))
+			hero = start.lerp(finish, _dash_progress(age))
+			tool_angle = lerpf(-1.85, 0.55, clampf((age - 0.035) / 0.075, 0.0, 1.0))
+			if age >= 0.035 and age < 0.15:
+				_paint_swing_fan(finish + Vector2(4, 0), 1.0 - (age - 0.035) / 0.115)
+	var flashing := int(model.protagonist.hit_flash) % 8 >= 3
+	_stamp(chief_flash if flashing else chief, hero)
+	var grip := hero + Vector2(4, 3)
+	var tool := (grip + Vector2.from_angle(tool_angle) * 12).round()
+	world.draw_line(grip.round(), tool, Color("#805042"), 2)
+	world.draw_rect(Rect2(tool - Vector2(2, 1), Vector2(4, 3)), Color("#fff3ba") if charging >= 1.0 else GOLD)
+	var bar := (door + Vector2(-9, 11)).round()
+	world.draw_rect(Rect2(bar, Vector2(18, 4)), INK)
+	world.draw_rect(Rect2(bar + Vector2.ONE, Vector2(floorf(charging * 16), 2)),
+		Color("#faffed") if charging >= 1.0 else GOLD)
+	if charging >= 1.0:
+		var glint := tool + Vector2(3, -3)
+		var color := Color(1.0, 1.0, 0.87, 0.7 + sin(elapsed * 7.0) * 0.25)
+		world.draw_rect(Rect2(glint - Vector2(0, 2), Vector2(1, 5)), color)
+		world.draw_rect(Rect2(glint - Vector2(2, 0), Vector2(5, 1)), color)
+	if model.protagonist.digestion_cooldown > 0:
+		var bubble := (door + Vector2(16, -22)).round()
+		world.draw_rect(Rect2(bubble, Vector2(13, 9)), INK)
+		world.draw_rect(Rect2(bubble + Vector2.ONE, Vector2(11, 7)), PAPER)
+		world.draw_rect(Rect2(bubble + Vector2(2, 9), Vector2(2, 2)), PAPER)
+		for i in 3:
+			var offset := int(i == floori(elapsed * 6) % 3)
+			world.draw_rect(Rect2(bubble + Vector2(3 + 3 * i, 4 - offset), Vector2(2, 2)), INK)
+
+func _paint_swing_fan(at: Vector2, opacity: float) -> void:
+	var vertices := PackedVector2Array([at.round()])
+	for i in 7:
+		vertices.append((at + Vector2.from_angle(lerpf(-1.4, 0.75, i / 6.0)) * 24).round())
+	world.draw_colored_polygon(vertices, Color(1.0, 1.0, 1.0, opacity * 0.72))
+	world.draw_polyline(vertices.slice(1), Color(1.0, 1.0, 1.0, opacity), 2.0)
+
 func _effect(event: Array) -> void:
 	var pos := _vec(event[1])
 	match event[0]:
@@ -568,11 +627,11 @@ func _effect(event: Array) -> void:
 			_debris(_vec(model.protagonist.pos) - Vector2(0, 6), Color("#c6f1ff"), 8)
 			audio.play("bonk")
 		"home_run":
-			effects.append({"pos": pos, "until": elapsed + 0.18,
-				"reach": _vec(model.protagonist.pos) + Vector2(8, -3), "color": SLASH})
-			effects.append({"pos": pos, "until": elapsed + 0.24, "color": SLASH})
+			dash = {"from": _vec(event[2]), "target": pos, "started": elapsed}
+			hitstop = maxf(hitstop, 0.05)
 			shake = maxf(shake, 2.0)
-			audio.play("swing")
+			_debris(pos, Color.WHITE, 11)
+			audio.play("home_run")
 		"shield":
 			effects.append({"pos": pos, "until": elapsed + 0.24, "color": Color("#fff1ba")})
 			_debris(pos, GOLD, 10)

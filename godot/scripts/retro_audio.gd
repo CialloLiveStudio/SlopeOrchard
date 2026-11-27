@@ -20,7 +20,7 @@ func _ready() -> void:
 		"bowl": _sample(0.29, 105.0, 48.0, 0.61),
 		"heal": _sample(0.26, 480.0, 1120.0, 0.0),
 		"bonk": _sample(0.15, 650.0, 210.0, 0.05),
-		"swing": _sample(0.19, 375.0, 95.0, 0.42),
+		"home_run": _sample(0.095, 850.0, 125.0, 0.57),
 		"shield": _sample(0.23, 230.0, 810.0, 0.06),
 	}
 	for i in 8:

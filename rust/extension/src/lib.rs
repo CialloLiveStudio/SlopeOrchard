@@ -1,6 +1,8 @@
 use godot::prelude::*;
 use serde_json::{json, Value};
-use slope_orchard_core::{Body, Orchard, Point, SlotItem, VfxEvent};
+use slope_orchard_core::{
+    Body, Orchard, Point, SlotItem, VfxEvent, HOME_RUN_COOLDOWN, SLOTS, TRELLIS_Y,
+};
 
 struct SlopeOrchardExtension;
 
@@ -65,6 +67,12 @@ impl OrchardBridge {
     }
 
     #[func]
+    fn trigger_home_run(&mut self, target_x: f32, target_y: f32) -> bool {
+        self.orchard
+            .trigger_home_run(Point::new(target_x, target_y))
+    }
+
+    #[func]
     fn swap_plants(&mut self, from: i32, to: i32) -> bool {
         self.orchard.swap_plants(from as usize, to as usize)
     }
@@ -123,9 +131,14 @@ impl OrchardBridge {
             "wave": orchard.wave, "phase": orchard.phase as u8, "unlocked_slots": orchard.unlocked_slots,
             "protagonist": {
                 "hp": orchard.protagonist.hp, "pos": point(orchard.protagonist.position()),
-                "swing_cooldown": orchard.protagonist.swing_cooldown, "hit_flash": orchard.protagonist.hit_flash,
+                "home_run_cooldown": orchard.protagonist.home_run_cooldown,
+                "home_run_charge": 1.0 - orchard.protagonist.home_run_cooldown as f32 / HOME_RUN_COOLDOWN as f32,
+                "digestion_cooldown": orchard.protagonist.digestion_cooldown,
+                "invulnerability_ticks": orchard.protagonist.invulnerability_ticks,
+                "hit_flash": orchard.protagonist.hit_flash,
             },
             "slots": orchard.slots.map(item),
+            "slot_x": SLOTS, "trellis_y": TRELLIS_Y,
             "reserve": orchard.reserve.iter().map(|&spare| item(Some(spare))).collect::<Vec<_>>(),
             "bodies": bodies, "monsters": monsters, "barricades": barricades, "juice_zones": juice_zones,
         })
@@ -158,7 +171,9 @@ impl OrchardBridge {
                 VfxEvent::ChiefHit(pos) => json!(["chief_hit", point(pos)]),
                 VfxEvent::ChiefHeal(pos) => json!(["heal", point(pos)]),
                 VfxEvent::ChiefBonk(pos) => json!(["bonk", point(pos)]),
-                VfxEvent::HomeRun(pos) => json!(["home_run", point(pos)]),
+                VfxEvent::HomeRunDash { from, target } => {
+                    json!(["home_run", point(target), point(from)])
+                }
                 VfxEvent::ShieldRebound(pos) => json!(["shield", point(pos)]),
             })
             .collect();
