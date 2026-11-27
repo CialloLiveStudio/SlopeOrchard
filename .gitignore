@@ -1,0 +1,6 @@
+/target/
+/dist/
+/godot/.godot/
+/godot/native/*.dll
+/godot/native/*.wasm
+/godot/native/~slope_orchard_extension.dll*
