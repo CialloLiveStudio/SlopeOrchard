@@ -1,3 +1,4 @@
+mod journal;
 use godot::prelude::*;
 use serde_json::{json, Value};
 use slope_orchard_core::{
@@ -338,7 +339,11 @@ impl OrchardBridge {
             .events
             .drain(..)
             .map(|event| match event {
-                VfxEvent::Synthesis(p) => json!(["synthesis", point(p)]),
+                VfxEvent::Synthesis(p, fruit) => json!(["synthesis", point(p), fruit as u8]),
+                VfxEvent::StickyRoll(p) => json!(["sticky_roll", point(p)]),
+                VfxEvent::StickyCatch(p) => json!(["sticky_catch", point(p)]),
+                VfxEvent::BubbleSwallow(p) => json!(["bubble_swallow", point(p)]),
+                VfxEvent::CandyLand(p) => json!(["candy_land", point(p)]),
                 VfxEvent::Pop(p) => json!(["pop", point(p)]),
                 VfxEvent::Quake(p, r) => json!(["quake", point(p), r]),
                 VfxEvent::CandyBite(p) => json!(["candy_bite", point(p)]),
@@ -376,10 +381,11 @@ impl OrchardBridge {
                 VfxEvent::ShieldRebound(pos) => json!(["shield", point(pos)]),
                 VfxEvent::MelonCombo {
                     pos,
+                    kind,
                     combo_bounces,
                     monster_hit,
                 } => {
-                    json!(["combo_bounces", point(pos), combo_bounces, monster_hit])
+                    json!(["combo_bounces", point(pos), combo_bounces, monster_hit, kind as u8])
                 }
                 VfxEvent::TameProgress(pos, progress, max) => {
                     json!(["tame_progress", point(pos), max - progress, max])

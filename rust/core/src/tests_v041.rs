@@ -30,7 +30,7 @@ fn all_ten_recipes_preview_merge_regrow_split_and_reject_a_third_parent() {
                 assert_eq!(game.preview_graft(PlantSource::Slot(0), 1), Some(recipe));
                 assert!(game.graft_plants(0, 1));
                 assert!(game.slots[0].is_none());
-                assert!(matches!(game.events.back(), Some(VfxEvent::Synthesis(_))));
+                assert!(matches!(game.events.back(), Some(VfxEvent::Synthesis(..))));
                 assert!(!game.graft_plants(1, 2) && !game.merge(PlantSource::Seed(a), 1));
                 assert!(game.split_or_clear(1));
                 assert!(game.graft_plants(0, 1));

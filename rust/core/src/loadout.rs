@@ -188,6 +188,7 @@ impl Orchard {
         self.vines[to].impulse(2.);
         self.events.push_back(crate::VfxEvent::Synthesis(
             self.slot_snapshot(to).fruit_center,
+            recipe,
         ));
         true
     }

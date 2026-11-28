@@ -2,6 +2,7 @@ extends SceneTree
 
 const SCENE = preload("res://scenes/main.tscn")
 const STEP := 1.0 / 120.0
+const SaveStore = preload("res://scripts/orchard_save.gd")
 var failures := 0
 
 func _initialize() -> void:
@@ -36,12 +37,28 @@ func _drag(game: Node, from: Vector2, to: Vector2, button: MouseButton, shift :=
 	_mouse_button(game, to, button, false, shift)
 
 func _run() -> void:
+	_check_disk_save()
 	var game := SCENE.instantiate()
+	game.persistent = false
 	root.add_child(game)
 	await process_frame
 	game.set_process(false)
 	game.audio.muted = true
 	_check(game.background.get_size() == Vector2(480, 270), "Pixel pipeline dimensions")
+	_check(game.shell.page == "Title" and not game.hud.visible and game.mute_button.is_visible_in_tree(), "Initial Title")
+	game.shell.buttons.stages.pressed.emit()
+	_check(game.shell.page == "StageSelect" and game.shell.buttons.t2.disabled and game.shell.buttons.t5.disabled, "Roadmap gates")
+	game.shell.buttons.test.pressed.emit()
+	_check(not game.shell.buttons.t5.disabled, "Practice stage selection")
+	game.shell.buttons.t5.pressed.emit()
+	_check(game.practice_run and not game.save.collected(15) and not game.save.data.started, "Practice altered campaign")
+	game.home_button.pressed.emit()
+	game.shell.buttons.stages.pressed.emit()
+	game.shell.buttons.test.pressed.emit()
+	game.shell.buttons.other.pressed.emit()
+	_check(game.shell.page == "Almanac" and game.save.entries.size() == 16 and game.save.data.fruits.size() == 4, "Default collection")
+	game.shell.buttons.other.pressed.emit()
+	game.shell.buttons.t1.pressed.emit()
 	_check(game.model.stage == "Prep" and game.model.level_id == "t1", "Initial formal Prep")
 	_check(game.model.preview == [0.0, 3.0] and game.next_button.text == "开始守卫", "T1 preview and start")
 	await _check_green_input(game)
@@ -51,11 +68,27 @@ func _run() -> void:
 	_check_defeat(game)
 	game._toggle_mute()
 	_check(not game.audio.muted, "Audio control")
+	game.audio.muted = true
 	game.queue_free()
-	await process_frame
+	await create_timer(0.15).timeout
 	if failures == 0:
-		print("Slope Orchard v0.4.1 probe passed: T1/T2/T5 campaign, battle lock, retries, Sandbox, 10 unordered recipes in both modes, preview, merge, split, cuts, carried monsters and companions.")
+		print("Slope Orchard v0.5.0 probe passed: Title -> StageSelect -> Almanac -> Prep -> Battle, campaign records, practice isolation, Sandbox, 10 recipes, cargo, retries, companions and audio.")
 	quit(0 if failures == 0 else 1)
+
+func _check_disk_save() -> void:
+	if OS.has_feature("web"):
+		return
+	var path := "user://probe_%d_%d.json" % [OS.get_process_id(),Time.get_ticks_usec()]
+	var first := SaveStore.new(true,path)
+	first.commit(first.journal.begin_campaign())
+	first.commit(first.journal.record_clear("t1",4))
+	first.commit(first.journal.discover(10))
+	first.commit(first.journal.set_muted(true))
+	_check(FileAccess.file_exists(path), "Desktop save missing")
+	var restored := SaveStore.new(true,path)
+	_check(restored.data == first.data and restored.collected(10) and restored.collected(14)
+		and restored.continue_stage() == "t2" and restored.data.muted, "Desktop save round trip")
+	DirAccess.remove_absolute(path)
 
 func _scene_pixel(frame: Image, at: Vector2i) -> Color:
 	return frame.get_pixelv(at * frame.get_size() / Vector2i(480, 270))
@@ -190,6 +223,7 @@ func _check_campaign(game: Node) -> void:
 			bridge.take_events()
 		game._refresh_model()
 		_check(game.model.phase == game.VICTORY, "Campaign victory in " + level)
+		_check(game.save.data.clears.get(level,0) == game.model.protagonist.hp, "Best hearts in " + level)
 		game.next_button.pressed.emit()
 	_check(granted and game.model.level_id == "t5" and game.model.stage == "Prep", "T2 to T5 Prep")
 
@@ -216,6 +250,7 @@ func _check_grafts(game: Node) -> void:
 				_mouse_button(game,target,MOUSE_BUTTON_LEFT if reverse else button,false)
 				var result: Dictionary = game.model.slots[1]
 				_check(result.kind == expected and hover != null and result.name == hover.name, "Preview/commit mismatch in "+mode)
+				_check(game.save.collected(expected), "Committed recipe missing from Almanac")
 				_check(game.effects.any(func(e): return e.has("merge_slot") and e.merge_slot == 1), "Missing synthesis feedback")
 				_drag(game, seed, target, MOUSE_BUTTON_LEFT)
 				_check(game.model.slots[1].kind == expected, "Third seed overwrote a hybrid")
@@ -233,13 +268,14 @@ func _check_grafts(game: Node) -> void:
 	game.lulucy_button.pressed.emit()
 	_check(not game.model.lulucy and game.model.hellhound.present, "Independent Lulucy toggle")
 	game.next_button.pressed.emit()
-	_check(not game.companion_button.visible and not game.lulucy_button.visible and not game.level_buttons.sandbox.visible, "Battle controls locked")
+	_check(not game.companion_button.visible and not game.lulucy_button.visible and game.home_button.visible, "Battle controls locked")
 	_check(not game.bridge.swap_plants(1, 2) and not game.bridge.graft_plants(1, 2)
 		and not game.bridge.drop_seed(0,2) and not game.bridge.split_or_clear(1)
 		and not game.bridge.equip_plant(2, 3) and not game.bridge.set_lulucy(false), "Core Battle lock")
 	_drag(game, donor, base, MOUSE_BUTTON_LEFT, true)
 	_check(game.model.slots[1].kind == 11, "Battle drag moved a hybrid")
-	game._restart("t5")
+	var records: Dictionary = game.save.data.clears.duplicate()
+	game.start_stage("t5",true)
 	game.next_button.pressed.emit()
 	var tiers := {}
 	var oil := false
@@ -261,6 +297,7 @@ func _check_grafts(game: Node) -> void:
 				tiers["spent" if body.near_shatter else ("fresh" if body.energy_ratio == 1.0 else "cracked")] = true
 	game._refresh_model()
 	_check(game.model.phase == game.VICTORY, "T5 showcase victory")
+	_check(game.save.data.clears == records, "Practice victory modified the campaign")
 	_check(oil and burst and tiers.size() == 3, "T5 oil burst and all three melon snapshot tiers")
 	game._restart("sandbox")
 	game.companion_button.pressed.emit()

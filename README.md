@@ -1,5 +1,11 @@
 # Slope Orchard (斜坡果园)
 
+The title opens onto a live orchard. Start or continue the campaign, follow the three stops on the stage map, browse the illustrated Almanac, or enter full-loadout Sandbox. **主页** returns to the title. A new visit to a stage begins in Prep.
+
+Clearing T1 opens T2, and clearing T2 opens T5. The map keeps your best surviving hearts. **测试全解锁** opens practice runs for the current session. Practice victories leave campaign records intact. Grafting in Prep or Sandbox permanently reveals the resulting fruit in the Almanac. The audio button remembers your preference.
+
+Desktop saves use `user://slope_orchard_save.json`. Web builds also store the same versioned record under `slope_orchard_save_v1` in browser localStorage. On startup the game uses the newest valid revision.
+
 T1, T2 and T5 start in **Prep**. Drag seeds onto hooks to choose species, move plants between hooks, or return a plant to the seed tray. T1 and T2 start with four plants and six usable hooks. Select your companions and press **开始守卫**. During battle, click fruit to drop it vertically or swipe across vines for angled cuts. The T2 reinforcement pauses combat until you plant one more seed on an empty hook.
 
 T1 introduces the wild Hellhound. Feed it apples to recruit it. In T2 and T5, 小黑 herds monsters, kicks parked pumpkins and heads spent melons back toward the vines. Swipe a ripe apple into its mouth to start a downhill dash, or wake it from a nap. In T5, 露露西 converts puddles into fragile oil. A purple diamond marks a monster whose next fruit hit deals double damage.
@@ -34,6 +40,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
 ```
 
 The build script compiles and installs the release DLL, imports the Godot project, and runs a headless campaign and sandbox probe. Godot draws the scene and handles input and effects. The Rust core advances the orchard at 120 fixed simulation steps per second.
+
+After building, generate the nine 480×270 showcase PNGs with a rendering window. The runner uses a private in-memory journal and checks the live toy state before each capture.
+
+```powershell
+godot_console --path godot --resolution 960x540 --fixed-fps 30 --script res://scripts/showcase.gd
+```
+
+The images are written to `target/showcase_v05/`.
 
 ## Web
 

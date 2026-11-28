@@ -393,7 +393,11 @@ pub enum Phase {
 
 #[derive(Debug)]
 pub enum VfxEvent {
-    Synthesis(Point),
+    Synthesis(Point, FruitKind),
+    StickyRoll(Point),
+    StickyCatch(Point),
+    BubbleSwallow(Point),
+    CandyLand(Point),
     Quake(Point, f32),
     Pop(Point),
     AppleRain(Point),
@@ -422,6 +426,7 @@ pub enum VfxEvent {
     GreenSplat(Point, FruitKind),
     MelonCombo {
         pos: Point,
+        kind: FruitKind,
         combo_bounces: u32,
         monster_hit: bool,
     },
@@ -1019,6 +1024,7 @@ impl Orchard {
         self.events.push_back(VfxEvent::MelonBounce(body.pos));
         self.events.push_back(VfxEvent::MelonCombo {
             pos: body.pos,
+            kind: body.kind,
             combo_bounces: body.combo_bounces,
             monster_hit,
         });

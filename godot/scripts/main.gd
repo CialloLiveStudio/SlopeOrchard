@@ -2,6 +2,8 @@ extends Node2D
 
 const Art = preload("res://scripts/art.gd")
 const RetroAudio = preload("res://scripts/retro_audio.gd")
+const Shell = preload("res://scripts/shell.gd")
+const OrchardSave = preload("res://scripts/orchard_save.gd")
 const FONT = preload("res://assets/SlopeOrchardSansSC.ttf")
 const CLOUDS := [
 	Vector3i(14, 70, 31), Vector3i(88, 35, 45), Vector3i(174, 79, 37),
@@ -34,6 +36,8 @@ var bridge: RefCounted
 var model: Dictionary
 var slot_x: Array
 var background: Texture2D
+var horizons: Array[Texture2D] = []
+var canopy: Texture2D
 var clouds: Array[ImageTexture] = []
 var fruit_textures: Array[ImageTexture] = []
 var green_fruits: Array[ImageTexture] = []
@@ -66,7 +70,13 @@ var retry_button: Button
 var drag_swap := false
 var staff_until := 0.0
 var companion_button: Button
-var level_buttons := {}
+var home_button: Button
+var shell: Shell
+var save: OrchardSave
+var persistent := true
+var practice_run := false
+var demo_time := 0.0
+var demo_slot := 0
 var elapsed := 0.0
 var hitstop := 0.0
 var shake := 0.0
@@ -93,6 +103,8 @@ func _ready() -> void:
 	var layout: Dictionary = JSON.parse_string(bridge.snapshot())
 	slot_x = layout.slot_x
 	background = Art.scenery(slot_x)
+	horizons.assign([Art.horizon(false), Art.horizon(true)])
+	canopy = Art.canopy()
 	for cloud in CLOUDS:
 		clouds.append(Art.cloud(cloud.z))
 	for i in Art.FRUIT.size():
@@ -131,8 +143,16 @@ func _ready() -> void:
 	add_child(world)
 	audio = RetroAudio.new()
 	add_child(audio)
+	save = OrchardSave.new(persistent)
+	audio.muted = save.data.muted
 	_build_hud()
-	_refresh_model()
+	shell = Shell.new()
+	shell.game = self
+	shell.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(shell)
+	shell.size = Vector2(480,270)
+	mute_button = _button(Vector2(423, 3), Vector2(49, 20), "开声音" if audio.muted else "静音", _toggle_mute, false, self)
+	_home()
 
 func _build_hud() -> void:
 	hud = Control.new()
@@ -141,11 +161,7 @@ func _build_hud() -> void:
 	add_child(hud)
 	wave_label = _label(Vector2(87, 5), 11, "")
 	hint = _label(Vector2(12, 246), 11, "")
-	for entry in [["t1", "T1"], ["t2", "T2"], ["t5", "T5"], ["sandbox", "沙盒"]]:
-		var id: String = entry[0]
-		level_buttons[id] = _button(Vector2(232 + 42 * level_buttons.size(), 3), Vector2(39, 20),
-			entry[1], func(): _restart(id))
-	mute_button = _button(Vector2(423, 3), Vector2(48, 20), "静音", _toggle_mute)
+	home_button = _button(Vector2(365, 3), Vector2(53, 20), "主页", _home)
 	companion_button = _button(Vector2(175, 226), Vector2(77, 20), "", _toggle_companion)
 	lulucy_button = _button(Vector2(256, 226), Vector2(86, 20), "", _toggle_lulucy)
 	retry_button = _button(Vector2(297, 234), Vector2(80, 24), "重新布阵", func(): _retry(false))
@@ -162,7 +178,7 @@ func _label(at: Vector2, size: int, words: String) -> Label:
 	hud.add_child(label)
 	return label
 
-func _button(at: Vector2, extent: Vector2, words: String, action: Callable, accent := false) -> Button:
+func _button(at: Vector2, extent: Vector2, words: String, action: Callable, accent := false, parent: Node = null) -> Button:
 	var button := Button.new()
 	button.text = words
 	button.position = at
@@ -180,14 +196,43 @@ func _button(at: Vector2, extent: Vector2, words: String, action: Callable, acce
 		button.add_theme_stylebox_override(state, style)
 	for state in ["font_color", "font_hover_color", "font_pressed_color"]:
 		button.add_theme_color_override(state, INK if accent else PAPER)
+	var disabled_style := StyleBoxFlat.new()
+	disabled_style.bg_color = Color("#d6d2b7")
+	button.add_theme_stylebox_override("disabled", disabled_style)
+	button.add_theme_color_override("font_disabled_color", Color("#4a5a53"))
 	button.pressed.connect(action)
-	hud.add_child(button)
+	(parent if parent else hud).add_child(button)
 	button.size = extent
 	return button
 
 func _toggle_mute() -> void:
 	audio.muted = not audio.muted
+	save.commit(save.journal.set_muted(audio.muted))
 	mute_button.text = "开声音" if audio.muted else "静音"
+
+func _input(event: InputEvent) -> void:
+	if event.is_pressed() and (event is InputEventMouseButton or event is InputEventKey or event is InputEventScreenTouch):
+		audio.unlock()
+
+func _home() -> void:
+	hud.hide()
+	practice_run = false
+	shell.open("Title")
+	bridge.start_sandbox()
+	bridge.advance(0.25)
+	demo_time = 0.0
+	demo_slot = 0
+	_reset_presentation()
+
+func start_stage(id: String, practice := false) -> void:
+	if id != "sandbox" and not practice and not save.journal.stage_open(id):
+		return
+	practice_run = practice
+	shell.open("Game")
+	hud.show()
+	if id != "sandbox" and not practice:
+		save.commit(save.journal.begin_campaign())
+	_restart(id)
 
 func _toggle_companion() -> void:
 	if bridge.set_hellhound(not model.hellhound.present):
@@ -236,6 +281,9 @@ func _continue_run() -> void:
 		VICTORY:
 			if bridge.next_level():
 				_reset_presentation()
+			else:
+				_home()
+				shell.open("StageSelect")
 		DEFEAT:
 			_retry(true)
 
@@ -243,20 +291,25 @@ func _refresh_model() -> void:
 	model = JSON.parse_string(bridge.snapshot())
 	var phase := int(model.phase)
 	model.phase = phase
+	if shell.page != "Game":
+		audio.score("pastoral")
+		world.queue_redraw()
+		return
+	if not practice_run and model.level_id != "sandbox":
+		if phase == VICTORY and current_phase != VICTORY:
+			save.commit(save.journal.record_clear(model.level_id, int(model.protagonist.hp)))
+		if model.level_id == "t5" and model.lulucy and not save.collected(15):
+			save.commit(save.journal.discover(15))
+	audio.score("victory" if phase == VICTORY else ("dusk" if phase == DEFEAT else ("battle" if phase in [WAVE, REINFORCEMENT] else "pastoral")))
 	current_phase = phase
 	wave_label.text = "满配沙盒" if phase == SANDBOX else ("%s · %s %d/%d" % [
 		str(model.level_id).to_upper(), model.level_name, model.wave, model.wave_count])
-	for id in level_buttons:
-		var button: Button = level_buttons[id]
-		button.visible = model.can_configure or phase in [VICTORY, DEFEAT]
-		button.toggle_mode = true
-		button.set_pressed_no_signal(model.level_id == id)
 	companion_button.visible = model.can_configure and model.companion_slots >= 1
 	lulucy_button.visible = model.can_configure and model.companion_slots == 2
 	companion_button.text = "小黑 · " + ("上阵" if model.hellhound.present else "休息")
 	lulucy_button.text = "露露西 · " + ("上阵" if model.lulucy else "休息")
 	retry_button.visible = phase == DEFEAT
-	next_button.visible = phase in [PREP, DEFEAT] or (phase == VICTORY and model.next_level != null)
+	next_button.visible = phase in [PREP, DEFEAT, VICTORY]
 	hint.position = Vector2(10, 249)
 	match phase:
 		PREP, SANDBOX:
@@ -272,8 +325,8 @@ func _refresh_model() -> void:
 		REINFORCEMENT:
 			hint.text = "增援到达 · 拖一枚种子到发光空位，继续守卫"
 		VICTORY:
-			next_button.text = "下一关"
-			hint.text = {"t1": "胜利 · 小黑加入果园", "t2": "胜利 · 解锁炼金果园与双伙伴", "t5": "通关 · 露露西加入果园 · 双伙伴与嫁接展示完成"}.get(model.level_id)
+			next_button.text = "下一关" if model.next_level != null else "关卡选择"
+			hint.text = "测试全解锁 · 练习完成" if practice_run else {"t1": "小黑加入果园", "t2": "炼金与杂交已开放", "t5": "露露西与小黑守住了果园"}.get(model.level_id)
 		DEFEAT:
 			next_button.text = "直接重试"
 			hint.text = "果园失守"
@@ -284,6 +337,17 @@ func _refresh_model() -> void:
 
 func _process(delta: float) -> void:
 	elapsed += delta
+	if shell.page != "Game":
+		if shell.page == "Title":
+			demo_time += delta
+			if demo_time >= 1.65:
+				demo_time -= 1.65
+				bridge.cut_fruit([2,4,1,5,0][demo_slot % 5])
+				demo_slot += 1
+			bridge.advance(delta)
+			bridge.take_events()
+			_refresh_model()
+		return
 	mouse = get_global_mouse_position()
 	if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		swiping = false
@@ -319,6 +383,8 @@ func _drain_events() -> void:
 		_effect(events[i], combo_hit)
 
 func _unhandled_input(event: InputEvent) -> void:
+	if shell.page != "Game":
+		return
 	if event is InputEventMouseButton and event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT]:
 		mouse = event.position
 		if event.pressed:
@@ -472,6 +538,15 @@ func _paint_hud() -> void:
 	hud.draw_rect(Rect2(0, 26, 480, 2), Color("#466179"))
 	for i in 5:
 		hud.draw_texture(hearts[0 if i < model.protagonist.hp else 1], Vector2(12 + 14 * i, 7))
+	if current_phase in [VICTORY, DEFEAT]:
+		var won := current_phase == VICTORY
+		var trim := GOLD if won else Color("#bd8382")
+		hud.draw_rect(Rect2(145,84,190,70),INK)
+		hud.draw_rect(Rect2(145,84,190,70),trim,false,2)
+		hud.draw_string(FONT, Vector2(147,110), "果园守住了" if won else "果园失守", HORIZONTAL_ALIGNMENT_CENTER,186,18,trim)
+		hud.draw_string(FONT,Vector2(174,138),"剩余生命",HORIZONTAL_ALIGNMENT_LEFT,-1,12,PAPER)
+		for i in 5:
+			hud.draw_texture(hearts[0 if i < model.protagonist.hp else 1],Vector2(233+15*i,127))
 	if current_phase != WAVE:
 		hud.draw_rect(Rect2(0, 221, 480, 49), INK)
 		hud.draw_rect(Rect2(0, 221, 480, 2), GOLD)
@@ -580,7 +655,28 @@ func _paint_world() -> void:
 		var cloud: Vector3i = CLOUDS[i]
 		var x := fposmod(cloud.x + cloud.z - elapsed * (2.0 + i % 2), 480 + cloud.z) - cloud.z
 		world.draw_texture(clouds[i], Vector2(round(x), cloud.y))
+	for i in horizons.size():
+		var shift := roundi(sin(elapsed * (0.12 + i*0.07)) * (2+i))
+		for wrap in [-480,0,480]:
+			world.draw_texture(horizons[i], Vector2(shift+wrap,0))
+		if i == 1:
+			for x in range(16,480,32):
+				var sway := roundi(sin(elapsed*0.8+x*0.09))
+				world.draw_texture(canopy,Vector2(x-7+shift+sway,Art.hill_y(x,true)-19))
 	world.draw_texture(background, Vector2.ZERO)
+	if model.level_id == "t2":
+		world.draw_rect(Rect2(0,0,480,270), Color("#829ecc24"))
+	elif model.level_id == "t5":
+		world.draw_rect(Rect2(0,0,480,270), Color("#ff965866"))
+		var lamp := Vector2(55,124)
+		world.draw_circle(lamp,9+roundf(sin(elapsed*2)),Color("#ae73dd48"))
+		world.draw_circle(lamp,5,Color("#cd92f17a"))
+		world.draw_rect(Rect2(53,119,4,6),Color("#ffe0ff"))
+		world.draw_line(Vector2(55,113),Vector2(55,118),INK)
+	for i in 7:
+		var petal := Vector2(fposmod(53*i+elapsed*(4+i%3),480), 79+fposmod(i*13+elapsed*2,89))
+		petal.x += sin(elapsed+i)*3
+		world.draw_rect(Rect2(petal.round(),Vector2(2,1)),Color("#fff4dbad"))
 	for zone in model.juice_zones:
 		_paint_juice(zone)
 	if model.lulucy:
@@ -591,7 +687,7 @@ func _paint_world() -> void:
 		world.draw_rect(Rect2(wand-Vector2(2,2), Vector2(4,4)), Color("#e6acff"))
 	_paint_protagonist()
 	var active: bool = model.phase in [WAVE, SANDBOX]
-	var focus := _focused_fruit() if active and dragged_item < 0 else -1
+	var focus := _focused_fruit() if active and dragged_item < 0 and shell.page == "Game" else -1
 	if focus >= 0:
 		var origin := _drop_guide(focus)
 		var x := origin.x
@@ -627,8 +723,6 @@ func _paint_world() -> void:
 		world.draw_set_transform(at, atan(0.194), Vector2(1,0.23))
 		world.draw_arc(Vector2.ZERO, 6 + float(bait.radius)*ripple, 0, TAU, 28, Color(1,0.68,0.85,1-ripple), 2)
 		world.draw_set_transform(Vector2.ZERO)
-		_stamp(fruit_textures[CANDY], at, Vector2.ONE * float(bait.scale))
-		_sparkle(at + Vector2(8,-7), GOLD)
 	for barrier in model.barricades:
 		_paint_barricade(barrier)
 	for body in model.bodies:
@@ -642,6 +736,8 @@ func _paint_world() -> void:
 		if body.kind == PINBALL:
 			texture = marble
 			scaling *= 1.35
+			var streak := _vec(body.velocity).normalized()
+			world.draw_line((pos-streak*11).round(), (pos-streak*4).round(), Color("#fff1bdac"), 2)
 		if body.kind == BUBBLE:
 			var wobble := sin(elapsed*12+float(body.id))*0.07
 			scaling *= Vector2(1+wobble,1-wobble) * (1.35 if body.passengers.size() else 1.0)
@@ -683,6 +779,7 @@ func _paint_world() -> void:
 			continue # The wild enemy is drawn from the hellhound snapshot.
 		var pos := _vec(enemy.pos)
 		if enemy.hungry:
+			world.draw_string_outline(FONT, pos + Vector2(-2,-16), "!", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 3, INK)
 			world.draw_string(FONT, pos + Vector2(-2,-16), "!", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, GOLD)
 		if enemy.dizzy > 0:
 			_orbit_stars(pos + Vector2(0,-12), 6)
@@ -705,6 +802,11 @@ func _paint_world() -> void:
 		var bar := (pos + Vector2(-width / 2.0, -10 if enemy.kind == 0 else -14)).round()
 		world.draw_rect(Rect2(bar, Vector2(width, 3)), INK)
 		world.draw_rect(Rect2(bar + Vector2.ONE, Vector2(ceili((width - 2) * enemy.hp / enemy.max_hp), 1)), Color("#ed7958"))
+	# Keep the candy visible among diners sharing the same stretch of slope.
+	for bait in model.baits:
+		var at := _vec(bait.pos)
+		_stamp(fruit_textures[CANDY], at, Vector2.ONE * float(bait.scale))
+		_sparkle(at + Vector2(8,-7), GOLD)
 	if model.hellhound.present:
 		_paint_hellhound(model.hellhound)
 	if dragged_item >= 0:
@@ -731,6 +833,16 @@ func _paint_world() -> void:
 			var frac := 1.0-age/0.3
 			world.draw_set_transform(pos.round(),atan(0.194),Vector2(1,0.28))
 			world.draw_arc(Vector2.ZERO, 4 + frac*float(effect.quake), 0, TAU, 28, Color(1,0.86,0.56,1-frac), 3)
+			world.draw_set_transform(Vector2.ZERO)
+		elif effect.has("rain"):
+			var burst := 0.42 - age
+			var shell_texture := fruit_textures[9]
+			var half := floorf(shell_texture.get_width()/2.0)
+			for side in [-1,1]:
+				var chip := pos + Vector2(side*(6+79*burst), -40*burst+100*burst*burst)
+				world.draw_set_transform(chip.round(),side*burst*4)
+				var source := Rect2(0 if side < 0 else half,0,half,shell_texture.get_height())
+				world.draw_texture_rect_region(shell_texture,Rect2(-source.size/2, source.size),source)
 			world.draw_set_transform(Vector2.ZERO)
 		elif effect.has("merge_slot"):
 			for i in 6:
@@ -921,6 +1033,8 @@ func _effect(event: Array, combo_hit := false) -> void:
 	var pos := _vec(event[1])
 	match event[0]:
 		"synthesis":
+			if shell.page == "Game" and model.phase in [PREP, SANDBOX]:
+				save.commit(save.journal.discover(int(event[2])))
 			effects.append({"pos":pos,"merge_slot":_slot_near(pos+world.position,8),"until":elapsed+0.32})
 			audio.play("synthesis")
 		"quake":
@@ -929,8 +1043,13 @@ func _effect(event: Array, combo_hit := false) -> void:
 			audio.play("quake")
 		"pop", "apple_rain":
 			_debris(pos, PINK if event[0] == "pop" else GOLD, 15)
-			effects.append({"pos":pos,"until":elapsed+0.24,"color":PINK})
-			audio.play("pop")
+			if event[0] == "apple_rain":
+				effects.append({"pos":pos,"until":elapsed+0.42,"rain":true})
+			else:
+				effects.append({"pos":pos,"until":elapsed+0.24,"color":PINK})
+			audio.play(event[0])
+		"sticky_roll", "sticky_catch", "bubble_swallow", "candy_land":
+			audio.play(event[0])
 		"candy_bite":
 			_debris(pos, PINK, 3)
 			audio.play("munch")
@@ -941,7 +1060,7 @@ func _effect(event: Array, combo_hit := false) -> void:
 			effects.append({"pos": pos, "until": elapsed + 0.15,
 				"slash": Vector2(float(event[3]) / 90.0, 1).normalized() * 18.0,
 				"color": GREEN if green_cut else (SLASH if angled else PAPER)})
-			audio.play(event[0])
+			audio.play("pinball" if int(event[2]) == PINBALL else event[0])
 		"shatter":
 			_debris(pos, FRUIT_COLORS[int(event[2])], 10)
 		"green_splat":
@@ -963,7 +1082,7 @@ func _effect(event: Array, combo_hit := false) -> void:
 			effects.append({"pos": pos, "until": elapsed + 0.24, "color": Color("#f4ffae")})
 			_debris(pos, Color("#c4e584"), 8)
 		"combo_bounces":
-			audio.play_combo(int(event[2]))
+			audio.play_combo(int(event[2]), int(event[4]) == PINBALL)
 			if event[3]:
 				hitstop = maxf(hitstop, COMBO_HITSTOP)
 		"knock":
@@ -1035,10 +1154,15 @@ func _effect(event: Array, combo_hit := false) -> void:
 			var duration := 0.95 if event[0] == "tamed" else 0.65
 			if event[0] == "tamed":
 				wild_reaction.clear()
+				if model.level_id == "t1" and not practice_run:
+					save.commit(save.journal.discover(14))
 			effects.append({"pos": pos, "until": elapsed + duration, "hearts": duration})
 			_debris(pos - Vector2(0, 8), GOLD, 10)
 			_debris(pos - Vector2(0, 8), PAPER, 6)
-			audio.play("heal")
+			if event[0] == "hellhound_revived":
+				audio.play("heal")
+			elif current_phase != VICTORY:
+				audio.play("tame")
 		"hellhound_charge":
 			hound_charge_until = elapsed + 0.12
 			_debris(pos + Vector2(0, 8), Color("#b78c68"), 6)
@@ -1063,6 +1187,8 @@ func _debris(at: Vector2, color: Color, count: int) -> void:
 	var particles := CPUParticles2D.new()
 	particles.position = at
 	particles.emitting = false
+	particles.use_fixed_seed = true
+	particles.seed = absi(hash([at.round(), color, count]))
 	particles.one_shot = true
 	particles.explosiveness = 1.0
 	particles.lifetime = 0.32

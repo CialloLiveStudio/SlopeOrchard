@@ -366,6 +366,30 @@ static func hellhound(pose: String, frame: int = 0) -> ImageTexture:
 				box(bitmap, 24, y + 7, 3, 1, "#c8d079")
 	return ImageTexture.create_from_image(bitmap)
 
+static func hill_y(x: int, near: bool) -> int:
+	var angle := TAU*x/480.0
+	return roundi(160+cos(angle*3)*6+sin(angle)*12) if near else roundi(137+sin(angle*2)*10+cos(angle*4)*3)
+
+static func canopy() -> ImageTexture:
+	var art := Image.create_empty(15,12,false,Image.FORMAT_RGBA8)
+	box(art,4,0,7,2,"#92b591")
+	box(art,2,2,11,8,"#92b591")
+	box(art,0,4,15,5,"#92b591")
+	box(art,3,9,10,2,"#82a989")
+	box(art,10,6,4,3,"#82a989")
+	box(art,3,4,2,2,"#d1aa89")
+	box(art,9,7,2,2,"#c39c80")
+	return ImageTexture.create_from_image(art)
+
+static func horizon(near: bool) -> ImageTexture:
+	var art := Image.create_empty(480,270,false,Image.FORMAT_RGBA8)
+	for x in 480:
+		var y := hill_y(x,near)
+		box(art,x,y,1,270-y,"#98bc99" if near else "#b4cfb7")
+		if x%32 == 16 and near:
+			box(art,x-1,y-9,3,10,"#859b79")
+	return ImageTexture.create_from_image(art)
+
 static func scenery(slots: Array) -> ImageTexture:
 	var art := Image.create_empty(480, 270, false, Image.FORMAT_RGBA8)
 	var rng := RandomNumberGenerator.new()
@@ -374,15 +398,10 @@ static func scenery(slots: Array) -> ImageTexture:
 	for x in 480:
 		var y := roundi(155.0 + 0.194 * (x - 70.0))
 		ground_rows.append(y)
-		var ridge := roundi(160 + sin(x * 0.021) * 9 + cos(x * 0.012) * 12)
-		box(art, x, ridge, 1, 270 - ridge, "#9dcbb1")
-		var hill := roundi(183 + cos(x * 0.017 + 2.0) * 11 + sin(x * 0.008) * 8)
-		box(art, x, hill, 1, 270 - hill, "#7eae94")
-	for x in range(67, 480, 17):
-		var y := roundi(188 + cos(x * 0.017 + 2.0) * 11 + sin(x * 0.008) * 8)
-		box(art, x + 3, y, 2, 5, "#649781")
-		box(art, x, y - 8, 9, 9, "#6c9f89")
-		box(art, x + 2, y - 10, 5, 3, "#6c9f89")
+		if x > 64:
+			box(art,x,y-8,1,2,"#af9b76")
+			if x%23 < 3:
+				box(art,x,y-12,1,13,"#a19175")
 	for x in 480:
 		var y := ground_rows[x]
 		box(art, x, y, 1, 270 - y, "#704738")

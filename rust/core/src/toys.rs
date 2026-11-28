@@ -183,11 +183,13 @@ impl Orchard {
             }
             body.passengers.push(self.monsters.remove(i));
             if body.kind == Bubble {
+                self.events.push_back(VfxEvent::BubbleSwallow(body.pos));
                 self.launch_melon_rebound(body, if giant { 530. } else { 490. });
                 body.capture_bounces = 0;
                 self.events.push_back(VfxEvent::MelonBounce(body.pos));
                 return true;
             }
+            self.events.push_back(VfxEvent::StickyCatch(body.pos));
             if body.passengers.len() >= if giant { 5 } else { 3 } {
                 return self.pop_toy(body);
             }
@@ -290,8 +292,10 @@ impl Orchard {
                 body.velocity.x = (body.velocity.x + body.velocity.y * SLOPE).max(70.);
                 body.velocity.y = body.velocity.x * SLOPE;
                 self.events.push_back(VfxEvent::PumpkinBowl(body.pos));
+                self.events.push_back(VfxEvent::StickyRoll(body.pos));
             }
             Candy => {
+                self.events.push_back(VfxEvent::CandyLand(body.pos));
                 let radius = if giant { 112. } else { 76. };
                 self.slime_pool(body.pos.x, if giant { 32. } else { 22. });
                 self.baits.push(Bait {
